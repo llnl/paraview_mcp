@@ -730,7 +730,7 @@ class ParaViewManager:
             tuple: (success, message)
         """
         try:
-            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy, GetColorTransferFunction, GetOpacityTransferFunction
+            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy, GetColorTransferFunction, GetOpacityTransferFunction, GetScalarBar
             
             source = GetActiveSource()
             if not source:
@@ -811,6 +811,9 @@ class ParaViewManager:
                 lut.RescaleTransferFunction(low, high)
                 GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
             display.SetScalarBarVisibility(view, True)
+            scalar_bar = GetScalarBar(lut, view)
+            scalar_bar.WindowLocation = "Upper Right Corner"
+            scalar_bar.ScalarBarLength = 0.3
             lut_range = lut.RGBPoints
             return True, (
                 f"Colored by field: '{field}' from {field_location}, "
