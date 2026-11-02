@@ -50,6 +50,48 @@ python pvserver --multi-clients
 
 ### 3. Start claude desktop app 
 
+### Claude Code
+
+With ParaView from apt (Ubuntu 24.04 ships 5.11 for the system Python):
+
+```shell
+sudo apt install paraview python3-paraview
+uv venv --python /usr/bin/python3.12 --system-site-packages .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+claude mcp add paraview -s user -- "$PWD/.venv/bin/python" "$PWD/paraview_mcp_server.py" --server localhost --port 11111
+```
+
+Start `pvserver --multi-clients --server-port=11111` before Claude Code, which
+connects once at startup.
+
+## Headless server
+
+`--server builtin` renders in the server process without pvserver or a GUI, and
+`--transport streamable-http` serves MCP over HTTP at `http://<host>:<port>/mcp`:
+
+```shell
+python paraview_mcp_server.py --server builtin --transport streamable-http \
+    --http-host 0.0.0.0 --http-port 8765 --data-root /data --output-dir /output
+```
+
+| Option | Meaning |
+|---|---|
+| `--data-root DIR` | Only load data below DIR (repeatable); relative paths resolve against the first root |
+| `--output-dir DIR` | Write files such as STL exports to DIR instead of next to the data |
+| `--probe-timeout SECONDS` | Open each file in a subprocess first and reject it when that takes longer (default 120, 0 disables). Truncated files can otherwise block the server forever, e.g. LS-DYNA d3plot files without their state files |
+| `--allowed-host HOST:PORT` | Accepted Host headers (repeatable, `*` as port wildcard). Without it, a server listening on a non-loopback address accepts any host |
+
+Additional tools: `list_data_files`, `get_timesteps`, `set_time` (time steps of
+transient data such as crash simulations), `reset_session`, and an explicit
+color range in `color_by` (`range_min`, `range_max`).
+
+The Docker image runs the headless server on Mesa inside Xvfb:
+
+```shell
+docker build -t paraview-mcp .
+docker run --rm -p 8765:8765 -v /path/to/data:/data:ro paraview-mcp
+```
+
 ***
 
 ## Citing Paraview_MCP
