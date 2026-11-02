@@ -321,7 +321,7 @@ def set_color_map(field_name: str, color_points: list[dict]) -> str:
 
 
 @mcp.tool()
-def color_by(field: str, component: int = -1) -> str:
+def color_by(field: str, component: int = -1, range_min: float | None = None, range_max: float | None = None) -> str:
     """
     Color the active visualization by a specific field.
     This function first checks if the active source can be colored by fields
@@ -331,11 +331,13 @@ def color_by(field: str, component: int = -1) -> str:
     Args:
         field: Field name to color by
         component: Component to color by (-1 for magnitude)
+        range_min: Value shown with the lowest color (default: data minimum)
+        range_max: Value shown with the highest color (default: data maximum); set both when outliers make the default range useless
     
     Returns:
-        Status message
+        Status message including the color range
     """
-    success, message = pv_manager.color_by(field, component)
+    success, message = pv_manager.color_by(field, component, range_min, range_max)
     return message
 
 @mcp.tool()

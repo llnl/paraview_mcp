@@ -614,7 +614,7 @@ class ParaViewManager:
             self.logger.error(f"Error toggling visibility: {str(e)}")
             return False, f"Error toggling visibility: {str(e)}", None
     
-    def color_by(self, field, component=-1):
+    def color_by(self, field, component=-1, range_min=None, range_max=None):
         """
         Color the active visualization by a specific field.
         This function first checks if the active source can be colored by fields
@@ -623,12 +623,14 @@ class ParaViewManager:
         Args:
             field: Field name to color by.
             component: Component to color by (-1 for magnitude).
+            range_min: Value shown with the lowest color (default: data minimum).
+            range_max: Value shown with the highest color (default: data maximum).
             
         Returns:
             tuple: (success, message)
         """
         try:
-            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy
+            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy, GetColorTransferFunction, GetOpacityTransferFunction
             
             source = GetActiveSource()
             if not source:
@@ -661,7 +663,7 @@ class ParaViewManager:
             for i in range(point_info.GetNumberOfArrays()):
                 array_info = point_info.GetArrayInformation(i)
                 if array_info.GetName() == field:
-                    ColorBy(display, ('POINTS', field), component)
+                    ColorBy(display, ('POINTS', field))
                     field_available = True
                     field_location = 'POINTS'
                     break
@@ -671,7 +673,7 @@ class ParaViewManager:
                 for i in range(cell_info.GetNumberOfArrays()):
                     array_info = cell_info.GetArrayInformation(i)
                     if array_info.GetName() == field:
-                        ColorBy(display, ('CELLS', field), component)
+                        ColorBy(display, ('CELLS', field))
                         field_available = True
                         field_location = 'CELLS'
                         break
@@ -689,9 +691,31 @@ class ParaViewManager:
                 fields_str = ", ".join(available_fields)
                 return False, f"Error: Field '{field}' not found. Available fields are: {fields_str}"
             
+            # ColorBy's third argument would request a separate color map;
+            # the component is chosen on the shared color map instead.
+            lut = GetColorTransferFunction(field)
+            if component is not None and component >= 0:
+                lut.VectorMode = "Component"
+                lut.VectorComponent = component
+            else:
+                lut.VectorMode = "Magnitude"
+
             # Rescale the color map to show the full data range
-            display.RescaleTransferFunctionToDataRange(True)
-            return True, f"Colored by field: '{field}' from {field_location}"
+            display.RescaleTransferFunctionToDataRange(False, True)
+            if range_min is not None or range_max is not None:
+                low, high = lut.RGBPoints[0], lut.RGBPoints[-4]
+                low = low if range_min is None else range_min
+                high = high if range_max is None else range_max
+                # Keep the chosen range when the data or time step changes.
+                lut.AutomaticRescaleRangeMode = "Never"
+                lut.RescaleTransferFunction(low, high)
+                GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
+            display.SetScalarBarVisibility(view, True)
+            lut_range = lut.RGBPoints
+            return True, (
+                f"Colored by field: '{field}' from {field_location}, "
+                f"color range {lut_range[0]:g} to {lut_range[-4]:g}"
+            )
         except Exception as e:
             self.logger.error(f"Error coloring by field: {str(e)}")
             return False, f"Error coloring by field: {str(e)}"
