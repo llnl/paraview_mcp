@@ -1171,9 +1171,7 @@ class ParaViewManager:
                     break
             
             if not gui_view:
-                print("No existing GUI render view found. Make sure the ParaView GUI is connected.")
-                import sys
-                sys.exit(1)
+                return False, "No render view found. Load data or connect the ParaView GUI first.", ""
             
             # Set the found GUI view active
             SetActiveView(gui_view)
