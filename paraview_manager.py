@@ -5,8 +5,24 @@ This class encapsulates paraview.simple API to expose a higher-level API that is
 """
 
 import logging
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from paraview.simple import *
+
+# Opens a file in a separate process. Some readers never return on broken
+# input (e.g. LS-DYNA d3plot files whose state files are missing), which would
+# block the MCP server forever if attempted in-process.
+_PROBE_SCRIPT = """
+import sys
+from paraview.simple import OpenDataFile
+reader = OpenDataFile(sys.argv[1])
+if reader is None:
+    sys.exit(2)
+reader.UpdatePipelineInformation()
+"""
 
 class ParaViewManager:
     """
@@ -23,6 +39,72 @@ class ParaViewManager:
         # which is needed for operations like volume rendering.
         self.original_source = None
         self._data_folder = ""
+        # True when connected to a pvserver shared with a ParaView GUI.
+        self.collaboration = False
+        # Directories data may be loaded from; empty allows any path.
+        self.data_roots = []
+        # Directory for written files; None writes next to the loaded data.
+        self.output_dir = None
+        # Seconds a file may take to open in a probe process; 0 disables probing.
+        self.probe_timeout = 120.0
+
+    def configure(self, data_roots=(), output_dir=None, probe_timeout=120.0):
+        """
+        Restrict data access and set where files are written.
+
+        Args:
+            data_roots: Directories data may be loaded from (empty allows any path)
+            output_dir: Directory for written files (None writes next to the data)
+            probe_timeout: Seconds a file may take to open before it is rejected
+        """
+        self.data_roots = [Path(root).resolve() for root in data_roots]
+        self.output_dir = Path(output_dir).resolve() if output_dir else None
+        self.probe_timeout = probe_timeout
+
+    def _resolve_data_path(self, file_path):
+        """
+        Resolve a path and check it lies within a data root.
+
+        Returns:
+            tuple: (success, message, resolved_path)
+        """
+        path = Path(file_path).expanduser()
+        if not path.is_absolute() and self.data_roots:
+            path = self.data_roots[0] / path
+        path = path.resolve()
+        if self.data_roots and not any(
+            path == root or root in path.parents for root in self.data_roots
+        ):
+            roots = ", ".join(str(root) for root in self.data_roots)
+            return False, f"Error: {file_path} is outside the data directories ({roots}).", None
+        if not path.exists():
+            return False, f"Error: {path} does not exist.", None
+        return True, "", path
+
+    def _probe_readable(self, path):
+        """
+        Open a file in a subprocess to reject files a reader cannot handle.
+
+        Returns:
+            tuple: (success, message)
+        """
+        if not self.probe_timeout:
+            return True, ""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", _PROBE_SCRIPT, str(path)],
+                capture_output=True,
+                timeout=self.probe_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return False, (
+                f"Error: {path} could not be opened within {self.probe_timeout:.0f}s. "
+                "The file is probably truncated or incomplete (for LS-DYNA, check "
+                "that the d3plot01, d3plot02, ... state files are present)."
+            )
+        if result.returncode != 0:
+            return False, f"Error: ParaView has no reader that can open {path}."
+        return True, ""
     
     def _get_source_name(self, proxy):
         """
@@ -64,7 +146,12 @@ class ParaViewManager:
         try:
             # Import the paraview.simple module
             import importlib.util
-            
+
+            if server_url == "builtin":
+                # Render in this process; no ParaView GUI shares the session.
+                self.logger.info("Using the built-in ParaView session")
+                return True
+
             if importlib.util.find_spec("paraview.simple") is not None:
                 from paraview.simple import Connect, GetActiveView
                 
@@ -72,6 +159,7 @@ class ParaViewManager:
                 full_server_url = f"{server_url}:{port}" if port else server_url
                 self.logger.info(f"Connecting to ParaView at {full_server_url}")
                 self.connection = Connect(full_server_url)
+                self.collaboration = True
                 
                 # Get the active view to confirm connection
                 view = GetActiveView()
@@ -97,8 +185,16 @@ class ParaViewManager:
         """
         try:
             import os
-            from paraview.simple import OpenDataFile, Show, GetActiveView
-            
+            from paraview.simple import OpenDataFile, Show, GetActiveViewOrCreate
+
+            success, message, resolved = self._resolve_data_path(file_path)
+            if not success:
+                return False, message, None, ""
+            file_path = str(resolved)
+            success, message = self._probe_readable(file_path)
+            if not success:
+                return False, message, None, ""
+
             # Record the directory of the loaded file so we can re-use it.
             self._data_folder = os.path.dirname(file_path)
 
@@ -118,7 +214,7 @@ class ParaViewManager:
                 return False, f"Failed to load data from {file_path}", None, ""
             
             # Show in the active view
-            view = GetActiveView()
+            view = GetActiveViewOrCreate("RenderView")
             display = Show(reader, view)
             display.ScaleFactor = 0.5
             view.ResetCamera(False)
@@ -213,15 +309,19 @@ class ParaViewManager:
             if not active_source:
                 return False, "Error: No active source to save.", ""
 
-            # Check that we have a recorded data folder
-            if not hasattr(self, "_data_folder") or not self._data_folder:
-                return False, (
-                    "Error: No data folder known. "
-                    "Did you load data first before saving?"
-                ), ""
+            if self.output_dir is not None:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+                full_path = str(self.output_dir / os.path.basename(stl_filename))
+            else:
+                # Check that we have a recorded data folder
+                if not hasattr(self, "_data_folder") or not self._data_folder:
+                    return False, (
+                        "Error: No data folder known. "
+                        "Did you load data first before saving?"
+                    ), ""
 
-            # Compose the full path in the same folder as the loaded data
-            full_path = os.path.join(self._data_folder, stl_filename)
+                # Compose the full path in the same folder as the loaded data
+                full_path = os.path.join(self._data_folder, stl_filename)
 
             # Save to STL
             SaveData(full_path, proxy=active_source)
@@ -1171,19 +1271,24 @@ class ParaViewManager:
             self.logger.error(f"Error creating stream tracer: {str(e)}")
             return False, f"Error creating stream tracer: {str(e)}", None, ""
 
-    def get_screenshot(self):
+    def get_screenshot(self, width=1280, height=720):
         """
         Capture a screenshot from the current view.
-        
+
+        Args:
+            width: Image width in pixels
+            height: Image height in pixels
+
         Returns:
             tuple: (success, message, img_path)
         """
         try:
-            from paraview.collaboration import processServerEvents
             import tempfile
-            processServerEvents()
+            if self.collaboration:
+                from paraview.collaboration import processServerEvents
+                processServerEvents()
             from paraview import servermanager
-            from paraview.simple import SetActiveView, RenderAllViews, SaveScreenshot, ResetCamera
+            from paraview.simple import SetActiveView, RenderAllViews, SaveScreenshot, ResetCamera, GetActiveViewOrCreate
             
             # Get the active render view from the GUI connection
             pxm = servermanager.ProxyManager()
@@ -1195,7 +1300,9 @@ class ParaViewManager:
                     break
             
             if not gui_view:
-                return False, "No render view found. Load data or connect the ParaView GUI first.", ""
+                if self.collaboration:
+                    return False, "No render view found. Load data or connect the ParaView GUI first.", ""
+                gui_view = GetActiveViewOrCreate("RenderView")
             
             # Set the found GUI view active
             SetActiveView(gui_view)
@@ -1205,13 +1312,130 @@ class ParaViewManager:
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                 temp_path = tmp.name
             
-            SaveScreenshot(temp_path, gui_view)
-            # SaveScreenshot(temp_path, gui_view, ImageResolution=[1920, 1080])            
+            SaveScreenshot(temp_path, gui_view, ImageResolution=[int(width), int(height)])
             return True, "Screenshot captured", temp_path
         except Exception as e:
             self.logger.error(f"Error getting screenshot: {str(e)}")
             return False, f"Error getting screenshot: {str(e)}", None
     
+
+    def list_data_files(self, pattern="**/*", limit=200):
+        """
+        List loadable files below the data directories.
+
+        Args:
+            pattern: Glob pattern relative to each data directory
+            limit: Maximum number of files to list
+
+        Returns:
+            tuple: (success, message, paths)
+        """
+        if not self.data_roots:
+            return False, "Error: No data directories are configured.", []
+        try:
+            paths = []
+            for root in self.data_roots:
+                for path in sorted(root.glob(pattern)):
+                    if path.is_file():
+                        paths.append(str(path))
+                        if len(paths) >= limit:
+                            return True, f"First {limit} matching files", paths
+            return True, f"{len(paths)} matching files", paths
+        except Exception as e:
+            self.logger.error(f"Error listing data files: {str(e)}")
+            return False, f"Error listing data files: {str(e)}", []
+
+    def _time_source(self):
+        """The loaded data source, whose time steps drive the animation."""
+        from paraview.simple import GetActiveSource
+        return self.original_source or GetActiveSource()
+
+    def get_timesteps(self):
+        """
+        Describe the time steps of the loaded data.
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            from paraview.simple import GetAnimationScene
+            source = self._time_source()
+            if not source:
+                return False, "Error: No data loaded."
+            values = list(getattr(source, "TimestepValues", None) or [])
+            if not values:
+                return True, "The loaded data has no time steps."
+            current = GetAnimationScene().AnimationTime
+            return True, (
+                f"{len(values)} time steps from {values[0]:g} to {values[-1]:g} "
+                f"(index 0 to {len(values) - 1}); current time {current:g}."
+            )
+        except Exception as e:
+            self.logger.error(f"Error reading time steps: {str(e)}")
+            return False, f"Error reading time steps: {str(e)}"
+
+    def set_time(self, index=None, value=None):
+        """
+        Show the data at a time step.
+
+        Args:
+            index: Time step index; negative values count from the end
+            value: Time value; the nearest time step is used
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            from paraview.simple import GetAnimationScene, Render
+            source = self._time_source()
+            if not source:
+                return False, "Error: No data loaded."
+            values = list(getattr(source, "TimestepValues", None) or [])
+            if not values:
+                return False, "Error: The loaded data has no time steps."
+            if index is None and value is None:
+                return False, "Error: Give a time step index or a time value."
+            if index is not None:
+                if not -len(values) <= index < len(values):
+                    return False, f"Error: Index {index} is out of range (0 to {len(values) - 1})."
+                index = index % len(values)
+            else:
+                index = min(range(len(values)), key=lambda i: abs(values[i] - value))
+            scene = GetAnimationScene()
+            scene.UpdateAnimationUsingDataTimeSteps()
+            scene.AnimationTime = values[index]
+            Render()
+            return True, f"Showing time step {index} of {len(values) - 1} (time {values[index]:g})."
+        except Exception as e:
+            self.logger.error(f"Error setting time: {str(e)}")
+            return False, f"Error setting time: {str(e)}"
+
+    def reset_session(self):
+        """
+        Remove all sources and filters so another analysis can start.
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            from paraview.simple import Delete, GetSources, Render
+            # Filters must go before their inputs; retry until nothing is left.
+            for _ in range(100):
+                sources = list(GetSources().values())
+                if not sources:
+                    break
+                for source in sources:
+                    try:
+                        Delete(source)
+                    except Exception:
+                        pass
+            self.original_source = None
+            self._data_folder = ""
+            Render()
+            return True, "Removed all data and filters."
+        except Exception as e:
+            self.logger.error(f"Error resetting session: {str(e)}")
+            return False, f"Error resetting session: {str(e)}"
 
     def rotate_camera(self, azimuth=30.0, elevation=0.0):
         """

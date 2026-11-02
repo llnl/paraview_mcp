@@ -11,6 +11,10 @@ Usage:
 2. Start ParaView app and connect to the server
 3. Configure Claude Desktop to use this script
 
+Headless usage (no GUI, e.g. in a container):
+    python paraview_mcp_server.py --server builtin --transport streamable-http \
+        --http-host 0.0.0.0 --http-port 8765 --data-root /data --output-dir /output
+
 """
 import os
 import sys
@@ -19,10 +23,11 @@ import argparse
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.transport_security import TransportSecuritySettings
 from paraview_manager import ParaViewManager
 
 # Configure logging
-log_dir = Path.home() / "paraview_logs"
+log_dir = Path(os.environ.get("PARAVIEW_MCP_LOG_DIR", Path.home() / "paraview_logs"))
 os.makedirs(log_dir, exist_ok=True)
 log_file = log_dir / "paraview_mcp_external.log"
 
@@ -45,6 +50,11 @@ When using ParaView through this interface, please follow these guidelines:
 
 3. Paraview will be connect to mcp server on starup so no need to connect first.
 
+4. Use list_data_files to find data files. For transient results (e.g. LS-DYNA d3plot crash simulations), use get_timesteps and set_time to choose the time step to show.
+
+5. Call get_screenshot to show the user the current view after changing it.
+
+6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
 
 """
     
@@ -440,23 +450,80 @@ def create_streamline(seed_point_number: int, vector_field: str = None,
     else:
         return message
 
-@mcp.tool()
-def get_screenshot() -> str:
+@mcp.tool(structured_output=False)
+def get_screenshot(width: int = 1280, height: int = 720) -> Image | str:
     """
     Capture a screenshot of the current view and display it in chat.
-    
+
     Args:
-        display_in_chat: Whether to return the image data for display in chat
-    
+        width: Image width in pixels (default: 1280)
+        height: Image height in pixels (default: 720)
+
     Returns:
-        Image data or path
+        The PNG image, or an error message
     """
-    success, message, img_path = pv_manager.get_screenshot()    
+    success, message, img_path = pv_manager.get_screenshot(width, height)
 
     if not success:
         return message
-    else:
-        return Image(path=img_path)
+    try:
+        return Image(data=Path(img_path).read_bytes(), format="png")
+    finally:
+        Path(img_path).unlink(missing_ok=True)
+
+@mcp.tool()
+def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
+    """
+    List files in the data directories that can be passed to load_data.
+
+    Args:
+        pattern: Glob pattern relative to each data directory, e.g. "**/d3plot" (default: all files)
+        limit: Maximum number of files to list (default: 200)
+
+    Returns:
+        Matching file paths, one per line
+    """
+    success, message, paths = pv_manager.list_data_files(pattern, limit)
+    if not success or not paths:
+        return message
+    return f"{message}:\n" + "\n".join(paths)
+
+@mcp.tool()
+def get_timesteps() -> str:
+    """
+    Describe the time steps of the loaded data (count, range and current time).
+
+    Returns:
+        Status message
+    """
+    success, message = pv_manager.get_timesteps()
+    return message
+
+@mcp.tool()
+def set_time(index: int | None = None, value: float | None = None) -> str:
+    """
+    Show the loaded data at one time step.
+
+    Args:
+        index: Time step index; -1 is the last time step
+        value: Time value; the nearest time step is used when no index is given
+
+    Returns:
+        Status message
+    """
+    success, message = pv_manager.set_time(index, value)
+    return message
+
+@mcp.tool()
+def reset_session() -> str:
+    """
+    Remove all loaded data and filters to start a new analysis.
+
+    Returns:
+        Status message
+    """
+    success, message = pv_manager.reset_session()
+    return message
     
 @mcp.tool()
 def rotate_camera(azimuth: float = 30.0, elevation: float = 0.0) -> str:
@@ -559,6 +626,10 @@ def list_commands() -> str:
         "compute_surface_area: Compute the surface area of the active surface",
         "save_contour_as_stl: Save the active surface as STL",
         "get_screenshot: Capture a screenshot and display it in chat",
+        "list_data_files: List files in the data directories",
+        "get_timesteps: Describe the time steps of the loaded data",
+        "set_time: Show the data at a time step",
+        "reset_session: Remove all loaded data and filters",
         "rotate_camera: Rotate the camera view",
         "reset_camera: Reset the camera to show all data",
         "plot_line: Plot a line through the data",
@@ -570,27 +641,54 @@ def list_commands() -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="ParaView External MCP Server")
-    parser.add_argument("--server", type=str, default="localhost", help="ParaView server hostname (default: localhost)")
+    parser.add_argument("--server", type=str, default="localhost", help="ParaView server hostname, or 'builtin' to render in this process without a GUI (default: localhost)")
     parser.add_argument("--port", type=int, default=11111, help="ParaView server port (default: 11111)")
     parser.add_argument("--paraview_package_path", type=str, help="Path to the ParaView Python package", default=None)
-    
+    parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio", help="MCP transport (default: stdio)")
+    parser.add_argument("--http-host", type=str, default="127.0.0.1", help="Address to listen on with streamable-http (default: 127.0.0.1)")
+    parser.add_argument("--http-port", type=int, default=8765, help="Port to listen on with streamable-http (default: 8765)")
+    parser.add_argument("--allowed-host", action="append", default=[], help="Host header accepted with streamable-http, e.g. 'paraview-mcp:*' (repeatable; default: only localhost when listening on localhost)")
+    parser.add_argument("--data-root", action="append", default=[], help="Directory data may be loaded from (repeatable; default: any path)")
+    parser.add_argument("--output-dir", type=str, default=None, help="Directory for written files (default: next to the loaded data)")
+    parser.add_argument("--probe-timeout", type=float, default=120.0, help="Seconds a file may take to open in a probe process before it is rejected; 0 disables probing (default: 120)")
+
     args = parser.parse_args()
 
     # Add the ParaView package path to sys.path
     if args.paraview_package_path:
         sys.path.append(args.paraview_package_path)
-    
+
+    pv_manager.configure(
+        data_roots=args.data_root,
+        output_dir=args.output_dir,
+        probe_timeout=args.probe_timeout,
+    )
+
     # Connect to ParaView
     pv_manager.connect(args.server, args.port)
-    
+
+    if args.transport == "streamable-http":
+        mcp.settings.host = args.http_host
+        mcp.settings.port = args.http_port
+        if args.allowed_host:
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=args.allowed_host,
+            )
+        elif args.http_host not in ("127.0.0.1", "localhost", "::1"):
+            # Reached by other containers under a service name; Host headers vary.
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=False,
+            )
+
     # Run the MCP server
     try:
         logger.info("Starting ParaView External MCP Server")
         logger.info(f"ParaView server: {args.server}:{args.port}")
         # logger.info("Default prompt enabled: Claude will call one function per reply")
-        
+
         # Run the MCP server
-        mcp.run()
+        mcp.run(transport=args.transport)
     except KeyboardInterrupt:
         logger.info("Server stopped by user")
     except Exception as e:
