@@ -16,6 +16,7 @@ Headless usage (no GUI, e.g. in a container):
         --http-host 0.0.0.0 --http-port 8765 --data-root /data --output-dir /output
 
 """
+import base64
 import os
 import sys
 import logging
@@ -24,7 +25,9 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import BlobResourceContents, EmbeddedResource
 from paraview_manager import ParaViewManager
+import time_series
 
 # Configure logging
 log_dir = Path(os.environ.get("PARAVIEW_MCP_LOG_DIR", Path.home() / "paraview_logs"))
@@ -57,6 +60,8 @@ When using ParaView through this interface, please follow these guidelines:
 6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
 
 7. FEMZIP-compressed d3plot files are loaded like other files. They provide only the point array 'Deflection' and the cell arrays 'EffPlastStrn' (shells) and 'PartID'; eroded elements are removed.
+
+8. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
 
 """
     
@@ -495,6 +500,69 @@ def render_animation(start_index: int = 0, end_index: int = -1, max_frames: int 
         return message
     return [message, *(Image(data=frame, format="png") for frame in frames)]
 
+def _run_paths(runs: list[str]) -> list[str]:
+    """Resolve run directories (or files in them) within the data directories."""
+    paths = []
+    for run in runs:
+        success, message, resolved = pv_manager._resolve_data_path(run)
+        if not success:
+            raise ValueError(message)
+        paths.append(str(resolved))
+    return paths
+
+def _series_resource(payload: dict) -> EmbeddedResource:
+    return EmbeddedResource(
+        type="resource",
+        resource=BlobResourceContents(
+            uri="series://time-series",
+            mimeType=time_series.SERIES_MEDIA_TYPE,
+            blob=base64.b64encode(time_series.payload_bytes(payload)).decode(),
+        ),
+    )
+
+@mcp.tool()
+def list_time_series(run: str) -> str:
+    """
+    List the time series of an LS-DYNA run (binout history output): categories
+    such as glstat (global energies), matsum (part energies), nodout (nodes),
+    secforc (cross sections), rcforc (contacts), rwforc (rigid walls), with
+    their variables and entities (parts, nodes, sections, ...).
+
+    Args:
+        run: Run directory or a file in it, e.g. a00a00/Exp_088 or a00a00/Exp_088/d3plot
+
+    Returns:
+        One line per category with its variables and entities
+    """
+    try:
+        return time_series.list_time_series(_run_paths([run])[0])
+    except Exception as e:
+        return f"Error listing time series: {e}"
+
+@mcp.tool(structured_output=False)
+def get_time_series(runs: list[str], category: str, variables: list[str], entities: list[str] | None = None, title: str | None = None) -> list | str:
+    """
+    Show time series of one or more runs to the user as an interactive chart.
+    You receive a summary (min, max, peak time, final value per series), not
+    the data. Several runs are drawn on the time axis of the first one, which
+    compares design variants.
+
+    Args:
+        runs: Run directories or files in them, e.g. ["a00a00/Exp_088", "a00a00/Exp_308"]
+        category: Category from list_time_series, e.g. "glstat", "secforc", "rwforc/forces"
+        variables: Variables of the category, e.g. ["total_force"] or ["kinetic_energy", "internal_energy"]
+        entities: Entity ids or names (or parts of names) to include, e.g. ["c0_l"]; default all
+        title: Chart title (default: category and variables)
+
+    Returns:
+        A summary and the chart data, or an error message
+    """
+    try:
+        summary, payload = time_series.get_time_series(_run_paths(runs), category, variables, entities, title)
+    except Exception as e:
+        return f"Error reading time series: {e}"
+    return [summary, _series_resource(payload)]
+
 @mcp.tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
@@ -652,6 +720,8 @@ def list_commands() -> str:
         "get_screenshot: Capture a screenshot and display it in chat",
         "render_animation: Show the current view over time as an animation",
         "list_data_files: List files in the data directories",
+        "list_time_series: List the binout time series of a run",
+        "get_time_series: Chart time series of one or more runs",
         "get_timesteps: Describe the time steps of the loaded data",
         "set_time: Show the data at a time step",
         "reset_session: Remove all loaded data and filters",

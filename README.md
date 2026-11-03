@@ -82,8 +82,15 @@ python paraview_mcp_server.py --server builtin --transport streamable-http \
 | `--allowed-host HOST:PORT` | Accepted Host headers (repeatable, `*` as port wildcard). Without it, a server listening on a non-loopback address accepts any host |
 
 Additional tools: `list_data_files`, `get_timesteps`, `set_time` (time steps of
-transient data such as crash simulations), `reset_session`, and an explicit
-color range in `color_by` (`range_min`, `range_max`).
+transient data such as crash simulations), `render_animation` (the view over
+time as image frames), `list_time_series` and `get_time_series` (LS-DYNA
+binout history output of one or more runs, as data series), `reset_session`,
+and an explicit color range in `color_by` (`range_min`, `range_max`).
+
+Data series are returned as an embedded resource of type
+`application/vnd.onion.series+json`:
+`{"title", "x": {"label", "values"}, "series": [{"name", "values"}]}`, plus a
+text summary for the model.
 
 ### FEMZIP-compressed LS-DYNA results
 
