@@ -84,7 +84,9 @@ python paraview_mcp_server.py --server builtin --transport streamable-http \
 Additional tools: `list_data_files`, `get_timesteps`, `set_time` (time steps of
 transient data such as crash simulations), `render_animation` (the view over
 time as image frames), `compare_runs` (2 to 4 runs side by side with the same
-coloring, camera and time, optionally animated), `list_time_series` and `get_time_series` (LS-DYNA
+coloring, camera and time, optionally animated), `get_data_info` (bounds and
+array ranges), `sample_over_line` and `probe_over_time` (an array along a line or
+at a node over time, as data series), `list_time_series` and `get_time_series` (LS-DYNA
 binout history output of one or more runs, as data series), `reset_session`,
 and an explicit color range in `color_by` (`range_min`, `range_max`).
 

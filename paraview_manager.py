@@ -1565,6 +1565,302 @@ class ParaViewManager:
             if main_view is not None:
                 SetActiveView(main_view)
 
+    @staticmethod
+    def _leaves(data):
+        """Datasets of a fetched data object; multiblock readers yield one per part."""
+        if not data.IsA("vtkCompositeDataSet"):
+            return [data]
+        leaves = []
+        iterator = data.NewIterator()
+        iterator.InitTraversal()
+        while not iterator.IsDoneWithTraversal():
+            leaf = iterator.GetCurrentDataObject()
+            if leaf is not None and leaf.IsA("vtkDataSet"):
+                leaves.append(leaf)
+            iterator.GoToNextItem()
+        return leaves
+
+    def _fetch_leaves(self, source):
+        """Datasets of a source at the current time; their order is stable over time."""
+        from paraview import servermanager
+        source.UpdatePipeline(GetAnimationScene().AnimationTime)
+        return self._leaves(servermanager.Fetch(source))
+
+    @staticmethod
+    def _field_values(leaves, field):
+        """
+        Values of an array over all datasets; vectors become magnitudes and
+        datasets without the array (e.g. solids for shell results) get NaN.
+
+        Returns:
+            tuple: (location, values) with location 'POINTS' or 'CELLS', or (None, None)
+        """
+        import numpy as np
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+
+        location = None
+        for leaf in leaves:
+            if leaf.GetPointData().GetArray(field) is not None:
+                location = "POINTS"
+                break
+            if leaf.GetCellData().GetArray(field) is not None:
+                location = "CELLS"
+                break
+        if location is None:
+            return None, None
+        parts = []
+        for leaf in leaves:
+            attributes = leaf.GetPointData() if location == "POINTS" else leaf.GetCellData()
+            size = leaf.GetNumberOfPoints() if location == "POINTS" else leaf.GetNumberOfCells()
+            array = attributes.GetArray(field)
+            if array is None:
+                parts.append(np.full(size, np.nan))
+                continue
+            values = vtk_to_numpy(array).astype(np.float64)
+            parts.append(np.linalg.norm(values, axis=1) if values.ndim > 1 else values)
+        return location, np.concatenate(parts) if parts else np.array([])
+
+    @staticmethod
+    def _locations(leaves, location):
+        """Point positions or cell centers over all datasets."""
+        import numpy as np
+        from vtkmodules.util.numpy_support import vtk_to_numpy
+        from vtkmodules.vtkFiltersCore import vtkCellCenters
+
+        parts = []
+        for leaf in leaves:
+            if location == "CELLS":
+                centers = vtkCellCenters()
+                centers.SetInputData(leaf)
+                centers.Update()
+                points = centers.GetOutput().GetPoints()
+            else:
+                points = leaf.GetPoints()
+            parts.append(vtk_to_numpy(points.GetData()).astype(float) if points is not None else np.zeros((0, 3)))
+        return np.concatenate(parts) if parts else np.zeros((0, 3))
+
+    def get_data_info(self):
+        """
+        Describe the active data at the current time: bounds and array ranges.
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            import numpy as np
+            from paraview.simple import GetActiveSource
+
+            source = GetActiveSource() or self.original_source
+            if not source:
+                return False, "Error: No data loaded."
+            leaves = self._fetch_leaves(source)
+            bounds = source.GetDataInformation().GetBounds()
+            lines = [
+                f"{self._get_source_name(source)} at time {GetAnimationScene().AnimationTime:g}: "
+                f"{sum(leaf.GetNumberOfPoints() for leaf in leaves)} points, "
+                f"{sum(leaf.GetNumberOfCells() for leaf in leaves)} cells",
+                "bounds: x {:.6g} to {:.6g}, y {:.6g} to {:.6g}, z {:.6g} to {:.6g}".format(*bounds),
+            ]
+            names = {"point": [], "cell": []}
+            for leaf in leaves:
+                for kind, attributes in (("point", leaf.GetPointData()), ("cell", leaf.GetCellData())):
+                    for index in range(attributes.GetNumberOfArrays()):
+                        name = attributes.GetArrayName(index)
+                        if name and name not in names[kind]:
+                            names[kind].append(name)
+            for kind, kind_names in names.items():
+                for name in kind_names:
+                    _, values = self._field_values(leaves, name)
+                    finite = values[np.isfinite(values)]
+                    if len(finite):
+                        lines.append(
+                            f"{kind} array {name}: min {finite.min():.4g}, max {finite.max():.4g}, "
+                            f"99th percentile {np.percentile(finite, 99):.4g}"
+                        )
+            return True, "\n".join(lines)
+        except Exception as e:
+            self.logger.error(f"Error describing data: {str(e)}")
+            return False, f"Error describing data: {str(e)}"
+
+    def sample_over_line(self, point1, point2, field, resolution=200, radius=50.0):
+        """
+        Sample an array along a straight line at the current time. Each sample
+        takes the nearest point (or cell center) within radius, so thin shell
+        structures near the line are found.
+
+        Returns:
+            tuple: (success, message, payload) with the series payload
+        """
+        try:
+            import numpy as np
+            from paraview.simple import GetActiveSource
+            from vtkmodules.util.numpy_support import numpy_to_vtk
+            from vtkmodules.vtkCommonCore import vtkPoints, mutable
+            from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkStaticPointLocator
+
+            source = GetActiveSource() or self.original_source
+            if not source:
+                return False, "Error: No data loaded.", None
+            leaves = self._fetch_leaves(source)
+            location, values = self._field_values(leaves, field)
+            if values is None:
+                return False, f"Error: Field '{field}' not found.", None
+            positions = self._locations(leaves, location)
+            valid = np.isfinite(values)
+            points = vtkPoints()
+            points.SetData(numpy_to_vtk(np.ascontiguousarray(positions[valid]), deep=True))
+            cloud = vtkPolyData()
+            cloud.SetPoints(points)
+            locator = vtkStaticPointLocator()
+            locator.SetDataSet(cloud)
+            locator.BuildLocator()
+            candidates = values[valid]
+
+            start, end = np.asarray(point1, dtype=float), np.asarray(point2, dtype=float)
+            fractions = np.linspace(0.0, 1.0, int(resolution) + 1)
+            distance = fractions * np.linalg.norm(end - start)
+            samples = np.full(len(fractions), np.nan)
+            squared = mutable(0.0)
+            for index, fraction in enumerate(fractions):
+                nearest = locator.FindClosestPointWithinRadius(float(radius), start + fraction * (end - start), squared)
+                if nearest >= 0:
+                    samples[index] = candidates[nearest]
+            hits = np.isfinite(samples)
+            if not hits.any():
+                bounds = source.GetDataInformation().GetBounds()
+                return False, (
+                    f"Error: No data within {radius:g} of the line. Data bounds: "
+                    "x {:.6g} to {:.6g}, y {:.6g} to {:.6g}, z {:.6g} to {:.6g}".format(*bounds)
+                ), None
+            peak = int(np.nanargmax(samples))
+            message = (
+                f"{field} along the line from {list(point1)} to {list(point2)} at time "
+                f"{GetAnimationScene().AnimationTime:g}, nearest data within {radius:g}: "
+                f"{int(hits.sum())} of {len(samples)} samples found data; min {np.nanmin(samples):.4g}, "
+                f"max {samples[peak]:.4g} at distance {distance[peak]:.4g}"
+            )
+            payload = {
+                "title": f"{field} along a line",
+                "x": {"label": "Distance along the line", "values": [float(d) for d in distance]},
+                "series": [{"name": field, "values": [float(v) if np.isfinite(v) else None for v in samples]}],
+            }
+            return True, message, payload
+        except Exception as e:
+            self.logger.error(f"Error sampling over line: {str(e)}")
+            return False, f"Error sampling over line: {str(e)}", None
+
+    def probe_over_time(self, field, point=None, start_index=0, end_index=-1, max_samples=60):
+        """
+        Follow one node through time and record an array there.
+
+        The node nearest to point is used, or without a point the node where
+        the array is largest at the current time (for cell arrays, a node of
+        that cell). Cell arrays are averaged over the cells around the node.
+
+        Returns:
+            tuple: (success, message, payload) with the series payload
+        """
+        try:
+            import numpy as np
+            from vtkmodules.util.numpy_support import vtk_to_numpy
+            from vtkmodules.vtkCommonCore import vtkIdList
+
+            source = self._time_source()
+            if not source:
+                return False, "Error: No data loaded.", None
+            times = self._timestep_values(source)
+            if len(times) < 2:
+                return False, "Error: The loaded data has no time steps.", None
+            count = len(times)
+            if not (-count <= start_index < count and -count <= end_index < count):
+                return False, f"Error: Time step indexes must be between 0 and {count - 1}.", None
+            start, end = sorted((start_index % count, end_index % count))
+            indexes = list(range(start, end + 1))
+            samples_wanted = max(int(max_samples), 2)
+            if len(indexes) > samples_wanted:
+                step = (len(indexes) - 1) / (samples_wanted - 1)
+                indexes = sorted({indexes[round(i * step)] for i in range(samples_wanted)})
+
+            leaves = self._fetch_leaves(source)
+            location, values = self._field_values(leaves, field)
+            if values is None:
+                return False, f"Error: Field '{field}' not found.", None
+            point_offsets = np.cumsum([0] + [leaf.GetNumberOfPoints() for leaf in leaves])
+            positions = self._locations(leaves, "POINTS")
+            # Readers can produce absurd values (e.g. 1e34 strains in parts
+            # without plasticity); they would always win the maximum.
+            outliers = 0
+            if point is None:
+                magnitudes = np.abs(values[np.isfinite(values)])
+                nonzero = magnitudes[magnitudes > 0]
+                limit = 100 * float(np.percentile(nonzero, 95)) if len(nonzero) else np.inf
+                outliers = int((np.abs(values) > limit).sum())
+                values = np.where(np.abs(values) > limit, np.nan, values)
+            if point is not None:
+                node = int(np.argmin(np.linalg.norm(positions - np.asarray(point, dtype=float), axis=1)))
+            elif location == "POINTS":
+                node = int(np.nanargmax(values))
+            else:
+                cell = int(np.nanargmax(values))
+                cell_offsets = np.cumsum([0] + [leaf.GetNumberOfCells() for leaf in leaves])
+                leaf_index = int(np.searchsorted(cell_offsets, cell, side="right") - 1)
+                local_cell = leaves[leaf_index].GetCell(cell - int(cell_offsets[leaf_index]))
+                node = int(point_offsets[leaf_index]) + int(local_cell.GetPointId(0))
+            leaf_index = int(np.searchsorted(point_offsets, node, side="right") - 1)
+            local_node = node - int(point_offsets[leaf_index])
+            ids = leaves[leaf_index].GetPointData().GetArray("UserID")
+            node_id = int(ids.GetValue(local_node)) if ids is not None else -1
+            # ParaView 5.11's LS-DYNA reader returns unusable UserID values.
+            node_label = f"node {node_id}" if 0 < node_id < 2**31 else f"point {node}"
+            node_position = positions[node].tolist()
+
+            scene = GetAnimationScene()
+            scene.UpdateAnimationUsingDataTimeSteps()
+            original_time = scene.AnimationTime
+            samples = []
+            cells = vtkIdList()
+            try:
+                for index in indexes:
+                    scene.AnimationTime = times[index]
+                    leaf = self._fetch_leaves(source)[leaf_index]
+                    if location == "POINTS":
+                        array = leaf.GetPointData().GetArray(field)
+                        value = vtk_to_numpy(array)[local_node].astype(np.float64) if array is not None else np.nan
+                        samples.append(float(np.linalg.norm(value)) if np.ndim(value) else float(value))
+                        continue
+                    array = leaf.GetCellData().GetArray(field)
+                    if array is None or not hasattr(leaf, "BuildLinks"):
+                        samples.append(np.nan)
+                        continue
+                    leaf.BuildLinks()
+                    leaf.GetPointCells(local_node, cells)
+                    cell_values = vtk_to_numpy(array).astype(np.float64)
+                    around = [np.linalg.norm(cell_values[cells.GetId(i)]) for i in range(cells.GetNumberOfIds())]
+                    samples.append(float(np.mean(around)) if around else np.nan)
+            finally:
+                scene.AnimationTime = original_time
+
+            samples = np.asarray(samples, dtype=float)
+            sample_times = [times[i] for i in indexes]
+            if not np.isfinite(samples).any():
+                return False, f"Error: {node_label} has no '{field}' values; choose another point.", None
+            peak = int(np.nanargmax(np.abs(samples)))
+            message = (
+                f"{field} at {node_label} (at {[round(c, 1) for c in node_position]} when selected) "
+                f"over {len(samples)} time steps: min {np.nanmin(samples):.4g}, max {np.nanmax(samples):.4g}, "
+                f"largest magnitude {samples[peak]:.4g} at t={sample_times[peak]:.4g}, final {samples[-1]:.4g}"
+                + (f"; {outliers} outlier values were ignored when choosing the maximum" if outliers else "")
+            )
+            payload = {
+                "title": f"{field} at {node_label}",
+                "x": {"label": "Time", "values": [float(t) for t in sample_times]},
+                "series": [{"name": f"{field} ({node_label})", "values": [float(v) if np.isfinite(v) else None for v in samples]}],
+            }
+            return True, message, payload
+        except Exception as e:
+            self.logger.error(f"Error probing over time: {str(e)}")
+            return False, f"Error probing over time: {str(e)}", None
+
     def list_data_files(self, pattern="**/*", limit=200):
         """
         List loadable files below the data directories.
@@ -1671,7 +1967,7 @@ class ParaViewManager:
             tuple: (success, message)
         """
         try:
-            from paraview.simple import Delete, GetSources, Render
+            from paraview.simple import Delete, GetActiveView, GetSources, Render
             # Filters must go before their inputs; retry until nothing is left.
             for _ in range(100):
                 sources = list(GetSources().values())
@@ -1686,7 +1982,8 @@ class ParaViewManager:
             self._loaded_path = None
             self._data_folder = ""
             femzip_reader.release_all()
-            Render()
+            if GetActiveView() is not None:
+                Render()
             return True, "Removed all data and filters."
         except Exception as e:
             self.logger.error(f"Error resetting session: {str(e)}")

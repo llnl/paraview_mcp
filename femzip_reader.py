@@ -13,7 +13,7 @@ Use it from paraview.simple; the source behaves like a reader with time steps:
 
 Output (vtkUnstructuredGrid, eroded elements removed):
     points        deformed coordinates of the time step
-    point arrays  Deflection (displacement from the initial state)
+    point arrays  Deflection (displacement from the initial state), UserID (node ids)
     cell arrays   EffPlastStrn (shells; NaN for other elements), PartID
 """
 
@@ -138,6 +138,9 @@ def _build_grid(arrays, step):
     initial = arrays["node_coordinates"]
     # lasso names the deformed coordinates "node_displacement".
     current = arrays["node_displacement"][step] if "node_displacement" in arrays else initial
+    # Nodes of eroded elements may fly off; they are not drawn, so keep them
+    # in place to keep the bounds meaningful.
+    current = np.where(used[:, None], current, initial)
     points = vtkPoints()
     points.SetData(numpy_to_vtk(np.ascontiguousarray(current, dtype=np.float32), deep=True))
     grid.SetPoints(points)
@@ -146,7 +149,7 @@ def _build_grid(arrays, step):
     cells.SetCells(n_cells, numpy_to_vtkIdTypeArray(np.concatenate(connectivity).astype(np.int64), deep=True))
     grid.SetCells(numpy_to_vtk(np.concatenate(cell_types), deep=True), cells)
 
-    # Nodes of eroded elements may fly off; NaN keeps them out of color ranges.
+    # NaN keeps nodes of eroded elements out of color ranges.
     deflection_values = np.ascontiguousarray(current - initial, dtype=np.float32)
     deflection_values[~used] = np.nan
     deflection = numpy_to_vtk(deflection_values, deep=True)
@@ -155,6 +158,11 @@ def _build_grid(arrays, step):
     strain_array = numpy_to_vtk(np.concatenate(strain).astype(np.float32), deep=True)
     strain_array.SetName("EffPlastStrn")
     grid.GetCellData().AddArray(strain_array)
+    if "node_ids" in arrays:
+        # Same name as ParaView's LS-DYNA reader uses for node ids.
+        node_ids = numpy_to_vtk(np.asarray(arrays["node_ids"], dtype=np.int32), deep=True)
+        node_ids.SetName("UserID")
+        grid.GetPointData().AddArray(node_ids)
     part_array = numpy_to_vtk(np.concatenate(parts).astype(np.int32), deep=True)
     part_array.SetName("PartID")
     grid.GetCellData().AddArray(part_array)

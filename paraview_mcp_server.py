@@ -61,7 +61,7 @@ When using ParaView through this interface, please follow these guidelines:
 
 7. FEMZIP-compressed d3plot files are loaded like other files. They provide only the point array 'Deflection' and the cell arrays 'EffPlastStrn' (shells) and 'PartID'; eroded elements are removed.
 
-8. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
+8. For values at specific places, use get_data_info for bounds and ranges, sample_over_line for a profile along a line, and probe_over_time for a node over time. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
 
 """
     
@@ -590,6 +590,66 @@ def compare_runs(file_paths: list[str], field: str, range_min: float | None = No
     return [message, *(Image(data=image, format="png") for image in images)]
 
 @mcp.tool()
+def get_data_info() -> str:
+    """
+    Describe the active data at the current time: point and cell counts,
+    bounds, and min/max/99th percentile of every array. Use it to choose
+    probe locations and color ranges.
+
+    Returns:
+        Description of the data
+    """
+    success, message = pv_manager.get_data_info()
+    return message
+
+@mcp.tool(structured_output=False)
+def sample_over_line(point1: list[float], point2: list[float], field: str, resolution: int = 200, radius: float = 50.0) -> list | str:
+    """
+    Show the user a chart of an array along a straight line through the
+    active data at the current time, e.g. the deflection along the vehicle.
+    Each sample takes the nearest point (or cell center) within radius, so
+    thin shell structures near the line are found.
+
+    Args:
+        point1: Start point [x, y, z]
+        point2: End point [x, y, z]
+        field: Array to sample, e.g. "Deflection" (vectors become magnitudes)
+        resolution: Number of samples (default: 200)
+        radius: Search radius around each sample in model units (default: 50)
+
+    Returns:
+        A summary and the chart data, or an error message
+    """
+    success, message, payload = pv_manager.sample_over_line(point1, point2, field, resolution, radius)
+    if not success:
+        return message
+    return [message, _series_resource(payload)]
+
+@mcp.tool(structured_output=False)
+def probe_over_time(field: str, point: list[float] | None = None, start_index: int = 0, end_index: int = -1, max_samples: int = 60) -> list | str:
+    """
+    Show the user a chart of an array over time at one node of the loaded
+    data. The node moves with the material. It is the node nearest to point,
+    or without a point the node where the array is largest at the current
+    time. Cell arrays are averaged over the cells around the node. Each time
+    step takes up to a second.
+
+    Args:
+        field: Array to record, e.g. "Deflection" or "EffPlastStrn"
+        point: [x, y, z] near the node at the current time (default: location of the maximum)
+        start_index: First time step index (default: 0)
+        end_index: Last time step index; -1 is the last (default: -1)
+        max_samples: Maximum number of evenly spaced time steps (default: 60)
+
+    Returns:
+        A summary and the chart data, or an error message
+    """
+    success, message, payload = pv_manager.probe_over_time(field, point, start_index, end_index, max_samples)
+    if not success:
+        return message
+    return [message, _series_resource(payload)]
+
+@mcp.tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
     List files in the data directories that can be passed to load_data.
@@ -747,6 +807,9 @@ def list_commands() -> str:
         "render_animation: Show the current view over time as an animation",
         "compare_runs: Show 2 to 4 runs side by side",
         "list_data_files: List files in the data directories",
+        "get_data_info: Describe bounds and array ranges of the active data",
+        "sample_over_line: Chart an array along a line",
+        "probe_over_time: Chart an array over time at a node",
         "list_time_series: List the binout time series of a run",
         "get_time_series: Chart time series of one or more runs",
         "get_timesteps: Describe the time steps of the loaded data",
