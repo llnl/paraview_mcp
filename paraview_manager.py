@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from paraview.simple import *
+import femzip_reader
 
 # Opens a file in a separate process. Some readers never return on broken
 # input (e.g. LS-DYNA d3plot files whose state files are missing), which would
@@ -191,9 +192,13 @@ class ParaViewManager:
             if not success:
                 return False, message, None, ""
             file_path = str(resolved)
-            success, message = self._probe_readable(file_path)
-            if not success:
-                return False, message, None, ""
+            # ParaView's LS-DYNA reader cannot read FEMZIP files and would
+            # hang in the probe, so they are recognized first.
+            is_femzip = femzip_reader.is_femzip_file(file_path)
+            if not is_femzip:
+                success, message = self._probe_readable(file_path)
+                if not success:
+                    return False, message, None, ""
 
             # Record the directory of the loaded file so we can re-use it.
             self._data_folder = os.path.dirname(file_path)
@@ -204,7 +209,13 @@ class ParaViewManager:
             file_name = os.path.basename(file_path)
 
             # Special handling for raw volume files
-            if file_extension == '.raw':
+            if is_femzip:
+                # Named after the run folder, like "Exp_308 d3plot".
+                reader = femzip_reader.open_femzip_d3plot(
+                    file_path,
+                    registration_name=f"{os.path.basename(os.path.dirname(file_path))} {file_name}",
+                )
+            elif file_extension == '.raw':
                 reader = self._configure_raw_reader(file_path, file_name)
             else:
                 # Standard loading for other file types
@@ -1353,6 +1364,13 @@ class ParaViewManager:
         from paraview.simple import GetActiveSource
         return self.original_source or GetActiveSource()
 
+    @staticmethod
+    def _timestep_values(source):
+        """Time steps of a source; sources without the reader property use the time keeper."""
+        from paraview.simple import GetTimeKeeper
+        values = list(getattr(source, "TimestepValues", None) or [])
+        return values or list(GetTimeKeeper().TimestepValues)
+
     def get_timesteps(self):
         """
         Describe the time steps of the loaded data.
@@ -1365,7 +1383,7 @@ class ParaViewManager:
             source = self._time_source()
             if not source:
                 return False, "Error: No data loaded."
-            values = list(getattr(source, "TimestepValues", None) or [])
+            values = self._timestep_values(source)
             if not values:
                 return True, "The loaded data has no time steps."
             current = GetAnimationScene().AnimationTime
@@ -1393,7 +1411,7 @@ class ParaViewManager:
             source = self._time_source()
             if not source:
                 return False, "Error: No data loaded."
-            values = list(getattr(source, "TimestepValues", None) or [])
+            values = self._timestep_values(source)
             if not values:
                 return False, "Error: The loaded data has no time steps."
             if index is None and value is None:
@@ -1434,6 +1452,7 @@ class ParaViewManager:
                         pass
             self.original_source = None
             self._data_folder = ""
+            femzip_reader.release_all()
             Render()
             return True, "Removed all data and filters."
         except Exception as e:

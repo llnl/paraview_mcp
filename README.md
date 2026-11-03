@@ -85,6 +85,22 @@ Additional tools: `list_data_files`, `get_timesteps`, `set_time` (time steps of
 transient data such as crash simulations), `reset_session`, and an explicit
 color range in `color_by` (`range_min`, `range_max`).
 
+### FEMZIP-compressed LS-DYNA results
+
+`load_data` reads FEMZIP-compressed d3plot files (which ParaView's LS-DYNA
+reader cannot open) through `femzip_reader.py`, using the SIDACT FEMZIP library
+bundled with lasso-python 1.5.2. They provide the deformed mesh per time step
+without eroded elements, the point array `Deflection` and the cell arrays
+`EffPlastStrn` (shells) and `PartID`. Install it next to the requirements:
+
+```shell
+uv pip install --python .venv/bin/python --no-deps "lasso-python==1.5.2"
+uv pip install --python .venv/bin/python rich psutil h5py "pandas<2.3" "numpy==1.26.4"
+```
+
+Pin numpy to the version of the system ParaView (`python3 -c "import numpy; print(numpy.__version__)"`).
+Without lasso-python, FEMZIP files are rejected after the probe timeout.
+
 The Docker image runs the headless server on Mesa inside Xvfb:
 
 ```shell

@@ -19,9 +19,14 @@ RUN apt-get update \
 WORKDIR /app
 COPY requirements.txt .
 # The venv sees the apt ParaView module through the system site packages.
+# lasso-python 1.5.2 bundles SIDACT's FEMZIP library for reading compressed
+# d3plot files. Its declared dependencies cannot be installed (it requires the
+# removed "sklearn" package), so the ones the reader needs are listed here.
 RUN python3 -m venv --system-site-packages /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
-COPY paraview_manager.py paraview_mcp_server.py ./
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
+    && /opt/venv/bin/pip install --no-cache-dir --no-deps "lasso-python==1.5.2" \
+    && /opt/venv/bin/pip install --no-cache-dir rich psutil h5py "pandas<2.3" "numpy==1.26.4"
+COPY paraview_manager.py paraview_mcp_server.py femzip_reader.py ./
 
 RUN mkdir -p /data /output && chown ubuntu:ubuntu /output
 USER ubuntu

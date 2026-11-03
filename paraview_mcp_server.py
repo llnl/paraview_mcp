@@ -56,6 +56,8 @@ When using ParaView through this interface, please follow these guidelines:
 
 6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
 
+7. FEMZIP-compressed d3plot files are loaded like other files. They provide only the point array 'Deflection' and the cell arrays 'EffPlastStrn' (shells) and 'PartID'; eroded elements are removed.
+
 """
     
 logger = logging.getLogger("pv_external_mcp")
