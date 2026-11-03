@@ -821,6 +821,8 @@ class ParaViewManager:
                 lut.AutomaticRescaleRangeMode = "Never"
                 lut.RescaleTransferFunction(low, high)
                 GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
+            # Cells without a value (e.g. solids for shell results) are drawn gray.
+            lut.NanColor = [0.6, 0.6, 0.6]
             display.SetScalarBarVisibility(view, True)
             scalar_bar = GetScalarBar(lut, view)
             scalar_bar.WindowLocation = "Upper Right Corner"
