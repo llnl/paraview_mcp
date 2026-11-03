@@ -1287,6 +1287,38 @@ class ParaViewManager:
             self.logger.error(f"Error creating stream tracer: {str(e)}")
             return False, f"Error creating stream tracer: {str(e)}", None, ""
 
+    def _screenshot_view(self):
+        """
+        The render view screenshots show: the GUI's view when collaborating,
+        otherwise the active view (created when missing).
+
+        Returns:
+            tuple: (success, message, view)
+        """
+        if self.collaboration:
+            from paraview.collaboration import processServerEvents
+            processServerEvents()
+        from paraview import servermanager
+        from paraview.simple import SetActiveView, GetActiveViewOrCreate
+
+        # Get the active render view from the GUI connection
+        pxm = servermanager.ProxyManager()
+        gui_view = None
+        views = pxm.GetProxiesInGroup("views")
+        for (group, name), view_proxy in views.items():
+            if view_proxy.GetXMLName() == "RenderView":
+                gui_view = view_proxy
+                break
+
+        if not gui_view:
+            if self.collaboration:
+                return False, "No render view found. Load data or connect the ParaView GUI first.", None
+            gui_view = GetActiveViewOrCreate("RenderView")
+
+        # Set the found GUI view active
+        SetActiveView(gui_view)
+        return True, "", gui_view
+
     def get_screenshot(self, width=1280, height=720):
         """
         Capture a screenshot from the current view.
@@ -1300,40 +1332,80 @@ class ParaViewManager:
         """
         try:
             import tempfile
-            if self.collaboration:
-                from paraview.collaboration import processServerEvents
-                processServerEvents()
-            from paraview import servermanager
-            from paraview.simple import SetActiveView, RenderAllViews, SaveScreenshot, ResetCamera, GetActiveViewOrCreate
-            
-            # Get the active render view from the GUI connection
-            pxm = servermanager.ProxyManager()
-            gui_view = None
-            views = pxm.GetProxiesInGroup("views")
-            for (group, name), view_proxy in views.items():
-                if view_proxy.GetXMLName() == "RenderView":
-                    gui_view = view_proxy
-                    break
-            
-            if not gui_view:
-                if self.collaboration:
-                    return False, "No render view found. Load data or connect the ParaView GUI first.", ""
-                gui_view = GetActiveViewOrCreate("RenderView")
-            
-            # Set the found GUI view active
-            SetActiveView(gui_view)
+            from paraview.simple import RenderAllViews, SaveScreenshot
+
+            success, message, gui_view = self._screenshot_view()
+            if not success:
+                return False, message, ""
             RenderAllViews()
-            
-            import tempfile
+
             with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
                 temp_path = tmp.name
-            
+
             SaveScreenshot(temp_path, gui_view, ImageResolution=[int(width), int(height)])
             return True, "Screenshot captured", temp_path
         except Exception as e:
             self.logger.error(f"Error getting screenshot: {str(e)}")
             return False, f"Error getting screenshot: {str(e)}", None
-    
+
+    def render_animation(self, start_index=0, end_index=-1, max_frames=30, width=800, height=450):
+        """
+        Render the current view at evenly spaced time steps.
+
+        Args:
+            start_index: First time step index; negative values count from the end
+            end_index: Last time step index; negative values count from the end
+            max_frames: Maximum number of frames (at least 2)
+            width: Frame width in pixels
+            height: Frame height in pixels
+
+        Returns:
+            tuple: (success, message, frames) with the PNG bytes of each frame
+        """
+        try:
+            import tempfile
+            from paraview.simple import GetAnimationScene, SaveScreenshot
+
+            source = self._time_source()
+            if not source:
+                return False, "Error: No data loaded.", []
+            values = self._timestep_values(source)
+            count = len(values)
+            if count < 2:
+                return False, "Error: The loaded data has no time steps to animate.", []
+            if not (-count <= start_index < count and -count <= end_index < count):
+                return False, f"Error: Time step indexes must be between 0 and {count - 1}.", []
+            start, end = sorted((start_index % count, end_index % count))
+            indexes = list(range(start, end + 1))
+            max_frames = max(2, int(max_frames))
+            if len(indexes) > max_frames:
+                step = (len(indexes) - 1) / (max_frames - 1)
+                indexes = sorted({indexes[round(i * step)] for i in range(max_frames)})
+
+            success, message, view = self._screenshot_view()
+            if not success:
+                return False, message, []
+            scene = GetAnimationScene()
+            scene.UpdateAnimationUsingDataTimeSteps()
+            original_time = scene.AnimationTime
+            frames = []
+            try:
+                with tempfile.TemporaryDirectory() as frame_dir:
+                    for index in indexes:
+                        scene.AnimationTime = values[index]
+                        path = os.path.join(frame_dir, f"{index}.png")
+                        SaveScreenshot(path, view, ImageResolution=[int(width), int(height)])
+                        with open(path, "rb") as frame:
+                            frames.append(frame.read())
+            finally:
+                scene.AnimationTime = original_time
+            return True, (
+                f"{len(frames)} frames of time steps {indexes[0]} to {indexes[-1]} "
+                f"(time {values[indexes[0]]:g} to {values[indexes[-1]]:g}) of {count}."
+            ), frames
+        except Exception as e:
+            self.logger.error(f"Error rendering animation: {str(e)}")
+            return False, f"Error rendering animation: {str(e)}", []
 
     def list_data_files(self, pattern="**/*", limit=200):
         """

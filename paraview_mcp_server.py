@@ -52,7 +52,7 @@ When using ParaView through this interface, please follow these guidelines:
 
 4. Use list_data_files to find data files. For transient results (e.g. LS-DYNA d3plot crash simulations), use get_timesteps and set_time to choose the time step to show.
 
-5. Call get_screenshot to show the user the current view after changing it.
+5. Call get_screenshot to show the user the current view after changing it. For transient results, render_animation shows how the result evolves over time.
 
 6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
 
@@ -473,6 +473,28 @@ def get_screenshot(width: int = 1280, height: int = 720) -> Image | str:
     finally:
         Path(img_path).unlink(missing_ok=True)
 
+@mcp.tool(structured_output=False)
+def render_animation(start_index: int = 0, end_index: int = -1, max_frames: int = 30, width: int = 800, height: int = 450) -> list[Image | str] | str:
+    """
+    Render the current view over time and show it to the user as an animation
+    with play/pause controls. Set up data, coloring and camera first; they stay
+    the same in every frame. You receive only a few of the frames.
+
+    Args:
+        start_index: First time step index (default: 0)
+        end_index: Last time step index; -1 is the last time step (default: -1)
+        max_frames: Maximum number of evenly spaced frames; each takes about a second (default: 30)
+        width: Frame width in pixels (default: 800)
+        height: Frame height in pixels (default: 450)
+
+    Returns:
+        A summary followed by the PNG frames, or an error message
+    """
+    success, message, frames = pv_manager.render_animation(start_index, end_index, max_frames, width, height)
+    if not success:
+        return message
+    return [message, *(Image(data=frame, format="png") for frame in frames)]
+
 @mcp.tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
@@ -628,6 +650,7 @@ def list_commands() -> str:
         "compute_surface_area: Compute the surface area of the active surface",
         "save_contour_as_stl: Save the active surface as STL",
         "get_screenshot: Capture a screenshot and display it in chat",
+        "render_animation: Show the current view over time as an animation",
         "list_data_files: List files in the data directories",
         "get_timesteps: Describe the time steps of the loaded data",
         "set_time: Show the data at a time step",
