@@ -62,7 +62,10 @@ claude mcp add paraview -s user -- "$PWD/.venv/bin/python" "$PWD/paraview_mcp_se
 ```
 
 Start `pvserver --multi-clients --server-port=11111` before Claude Code, which
-connects once at startup.
+connects once at startup. `./start_gui.sh` starts that pvserver with the d3plot
+reader on its Python path and a ParaView GUI connected to it, so the GUI shows
+what the MCP server loads. Run it from a regular terminal: ParaView's Qt does
+not start from the terminal of the VS Code snap.
 
 ## Headless server
 
