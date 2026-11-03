@@ -53,6 +53,11 @@ def _arrays(path):
     return _ARRAYS[path]
 
 
+def release(path):
+    """Drop the cached arrays of one file."""
+    _ARRAYS.pop(str(path), None)
+
+
 def release_all():
     """Drop the cached arrays of all files."""
     _ARRAYS.clear()

@@ -55,7 +55,7 @@ When using ParaView through this interface, please follow these guidelines:
 
 4. Use list_data_files to find data files. For transient results (e.g. LS-DYNA d3plot crash simulations), use get_timesteps and set_time to choose the time step to show.
 
-5. Call get_screenshot to show the user the current view after changing it. For transient results, render_animation shows how the result evolves over time.
+5. Call get_screenshot to show the user the current view after changing it. For transient results, render_animation shows how the result evolves over time. compare_runs shows design variants side by side.
 
 6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
 
@@ -563,6 +563,32 @@ def get_time_series(runs: list[str], category: str, variables: list[str], entiti
         return f"Error reading time series: {e}"
     return [summary, _series_resource(payload)]
 
+@mcp.tool(structured_output=False)
+def compare_runs(file_paths: list[str], field: str, range_min: float | None = None, range_max: float | None = None, time_index: int = -1, frames: int = 1, width: int = 1200, height: int = 500) -> list[Image | str] | str:
+    """
+    Show 2 to 4 runs side by side with the same coloring, color range, camera
+    and time, e.g. design variants of a crash simulation. The camera of the
+    current view is used when data is loaded, so set it up first. With frames
+    above 1 the comparison is shown as an animation (about a second per frame).
+
+    Args:
+        file_paths: Data files of the runs, e.g. ["a00a00/Exp_088/d3plot", "a00a00/Exp_308/d3plot"]
+        field: Array to color by, e.g. "EffPlastStrn"
+        range_min: Value shown with the lowest color (default: data minimum)
+        range_max: Value shown with the highest color (default: data maximum)
+        time_index: Time step of a single image; -1 is the last (default: -1)
+        frames: Number of evenly spaced time steps; more than 1 animates (default: 1)
+        width: Image width in pixels (default: 1200)
+        height: Image height in pixels (default: 500)
+
+    Returns:
+        A summary followed by the PNG image(s), or an error message
+    """
+    success, message, images = pv_manager.compare_runs(file_paths, field, range_min, range_max, time_index, frames, width, height)
+    if not success:
+        return message
+    return [message, *(Image(data=image, format="png") for image in images)]
+
 @mcp.tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
@@ -719,6 +745,7 @@ def list_commands() -> str:
         "save_contour_as_stl: Save the active surface as STL",
         "get_screenshot: Capture a screenshot and display it in chat",
         "render_animation: Show the current view over time as an animation",
+        "compare_runs: Show 2 to 4 runs side by side",
         "list_data_files: List files in the data directories",
         "list_time_series: List the binout time series of a run",
         "get_time_series: Chart time series of one or more runs",

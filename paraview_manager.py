@@ -39,6 +39,7 @@ class ParaViewManager:
         # This will always hold the originally loaded data source,
         # which is needed for operations like volume rendering.
         self.original_source = None
+        self._loaded_path = None
         self._data_folder = ""
         # True when connected to a pvserver shared with a ParaView GUI.
         self.collaboration = False
@@ -174,6 +175,45 @@ class ParaViewManager:
             self.logger.error(f"Failed to connect to ParaView: {str(e)}")
             return False
     
+    def _open_reader(self, file_path):
+        """
+        Create a reader for a file within the data directories.
+
+        Returns:
+            tuple: (success, message, reader, resolved_path)
+        """
+        from paraview.simple import OpenDataFile
+
+        success, message, resolved = self._resolve_data_path(file_path)
+        if not success:
+            return False, message, None, None
+        file_path = str(resolved)
+        # ParaView's LS-DYNA reader cannot read FEMZIP files and would
+        # hang in the probe, so they are recognized first.
+        is_femzip = femzip_reader.is_femzip_file(file_path)
+        if not is_femzip:
+            success, message = self._probe_readable(file_path)
+            if not success:
+                return False, message, None, None
+
+        _, file_extension = os.path.splitext(file_path)
+        file_name = os.path.basename(file_path)
+        if is_femzip:
+            # Named after the run folder, like "Exp_308 d3plot".
+            reader = femzip_reader.open_femzip_d3plot(
+                file_path,
+                registration_name=f"{os.path.basename(os.path.dirname(file_path))} {file_name}",
+            )
+        elif file_extension.lower() == '.raw':
+            # Special handling for raw volume files
+            reader = self._configure_raw_reader(file_path, file_name)
+        else:
+            # Standard loading for other file types
+            reader = OpenDataFile(file_path)
+        if not reader:
+            return False, f"Failed to load data from {file_path}", None, None
+        return True, "", reader, file_path
+
     def load_data(self, file_path):
         """
         Load data from a file into ParaView
@@ -185,45 +225,15 @@ class ParaViewManager:
             tuple: (success, message, reader, source_name)
         """
         try:
-            import os
-            from paraview.simple import OpenDataFile, Show, GetActiveViewOrCreate
+            from paraview.simple import Show, GetActiveViewOrCreate
 
-            success, message, resolved = self._resolve_data_path(file_path)
+            success, message, reader, file_path = self._open_reader(file_path)
             if not success:
                 return False, message, None, ""
-            file_path = str(resolved)
-            # ParaView's LS-DYNA reader cannot read FEMZIP files and would
-            # hang in the probe, so they are recognized first.
-            is_femzip = femzip_reader.is_femzip_file(file_path)
-            if not is_femzip:
-                success, message = self._probe_readable(file_path)
-                if not success:
-                    return False, message, None, ""
 
             # Record the directory of the loaded file so we can re-use it.
             self._data_folder = os.path.dirname(file_path)
 
-            # Get file extension
-            _, file_extension = os.path.splitext(file_path)
-            file_extension = file_extension.lower()
-            file_name = os.path.basename(file_path)
-
-            # Special handling for raw volume files
-            if is_femzip:
-                # Named after the run folder, like "Exp_308 d3plot".
-                reader = femzip_reader.open_femzip_d3plot(
-                    file_path,
-                    registration_name=f"{os.path.basename(os.path.dirname(file_path))} {file_name}",
-                )
-            elif file_extension == '.raw':
-                reader = self._configure_raw_reader(file_path, file_name)
-            else:
-                # Standard loading for other file types
-                reader = OpenDataFile(file_path)
-            
-            if not reader:
-                return False, f"Failed to load data from {file_path}", None, ""
-            
             # Show in the active view
             view = GetActiveViewOrCreate("RenderView")
             display = Show(reader, view)
@@ -231,6 +241,7 @@ class ParaViewManager:
             view.ResetCamera(False)
             # Save the loaded reader as the original data source
             self.original_source = reader
+            self._loaded_path = file_path
             
             # Get the source name using the helper function
             source_name = self._get_source_name(reader)
@@ -1407,6 +1418,153 @@ class ParaViewManager:
             self.logger.error(f"Error rendering animation: {str(e)}")
             return False, f"Error rendering animation: {str(e)}", []
 
+    @staticmethod
+    def _field_location(source, field):
+        """'POINTS' or 'CELLS' for an array of a source, else None."""
+        if field in source.PointData.keys():
+            return "POINTS"
+        if field in source.CellData.keys():
+            return "CELLS"
+        return None
+
+    def compare_runs(self, file_paths, field, range_min=None, range_max=None, time_index=-1, frames=1, width=1200, height=500):
+        """
+        Render several runs side by side with the same coloring, camera and time.
+
+        Args:
+            file_paths: 2 to 4 data files, e.g. d3plot files of design variants
+            field: Array to color by
+            range_min: Value shown with the lowest color (default: data minimum)
+            range_max: Value shown with the highest color (default: data maximum)
+            time_index: Time step index of a single image; negative values count from the end
+            frames: Number of evenly spaced time steps; more than 1 renders an animation
+            width: Image width in pixels
+            height: Image height in pixels
+
+        Returns:
+            tuple: (success, message, images) with the PNG bytes of each image
+        """
+        from paraview.simple import (
+            AssignViewToLayout, ColorBy, CreateLayout, CreateView, Delete,
+            GetActiveView, GetAnimationScene, GetColorTransferFunction,
+            GetOpacityTransferFunction, RemoveLayout, SaveScreenshot,
+            SetActiveView, Show, Text,
+        )
+        import tempfile
+
+        if not 2 <= len(file_paths) <= 4:
+            return False, "Error: Compare 2 to 4 runs.", []
+        main_view = GetActiveView()
+        readers, views, displays, labels = [], [], [], []
+        layout = None
+        try:
+            for file_path in file_paths:
+                success, message, reader, resolved = self._open_reader(file_path)
+                if not success:
+                    return False, message, []
+                readers.append((reader, resolved))
+
+            location = self._field_location(readers[0][0], field)
+            if location is None:
+                fields = ", ".join([*readers[0][0].PointData.keys(), *readers[0][0].CellData.keys()])
+                return False, f"Error: Field '{field}' not found. Available fields are: {fields}", []
+            lut = GetColorTransferFunction(field)
+            lut.NanColor = [0.6, 0.6, 0.6]
+
+            layout = CreateLayout("Comparison")
+            for index, (reader, resolved) in enumerate(readers):
+                view = CreateView("RenderView")
+                views.append(view)
+                # Without a hint the layout splits its largest cell.
+                AssignViewToLayout(view=view, layout=layout)
+                display = Show(reader, view)
+                displays.append(display)
+                ColorBy(display, (location, field))
+                display.SetScalarBarVisibility(view, index == len(readers) - 1)
+                label = Text(Text=os.path.basename(os.path.dirname(resolved)))
+                labels.append(label)
+                label_display = Show(label, view)
+                label_display.WindowLocation = "Upper Left Corner"
+                label_display.FontSize = 14
+                if main_view is not None and hasattr(main_view, "CameraPosition") and self.original_source is not None:
+                    for prop in ("CameraPosition", "CameraFocalPoint", "CameraViewUp", "CameraParallelScale"):
+                        setattr(view, prop, getattr(main_view, prop))
+                else:
+                    view.ResetCamera(False)
+
+            views[0].Update()
+            if range_min is not None or range_max is not None:
+                displays[0].RescaleTransferFunctionToDataRange(False, True)
+                low = lut.RGBPoints[0] if range_min is None else range_min
+                high = lut.RGBPoints[-4] if range_max is None else range_max
+                lut.AutomaticRescaleRangeMode = "Never"
+                lut.RescaleTransferFunction(low, high)
+                GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
+
+            values = self._timestep_values(readers[0][0])
+            scene = GetAnimationScene()
+            scene.UpdateAnimationUsingDataTimeSteps()
+            original_time = scene.AnimationTime
+            if values:
+                count = len(values)
+                if not -count <= time_index < count:
+                    return False, f"Error: Time step index must be between 0 and {count - 1}.", []
+                if frames > 1:
+                    step = (count - 1) / (min(int(frames), count) - 1)
+                    indexes = sorted({round(i * step) for i in range(min(int(frames), count))})
+                else:
+                    indexes = [time_index % count]
+            else:
+                indexes = [None]
+
+            images = []
+            try:
+                if range_min is None and range_max is None:
+                    # One range over all runs at the last step shown, where
+                    # crash results usually peak, kept for every frame.
+                    if indexes[-1] is not None:
+                        scene.AnimationTime = values[indexes[-1]]
+                    for number, display in enumerate(displays):
+                        display.RescaleTransferFunctionToDataRange(number > 0, True)
+                    lut.AutomaticRescaleRangeMode = "Never"
+                with tempfile.TemporaryDirectory() as image_dir:
+                    for number, index in enumerate(indexes):
+                        if index is not None:
+                            scene.AnimationTime = values[index]
+                        path = os.path.join(image_dir, f"{number}.png")
+                        SaveScreenshot(path, layout, SaveAllViews=1, ImageResolution=[int(width), int(height)])
+                        with open(path, "rb") as image:
+                            images.append(image.read())
+            finally:
+                scene.AnimationTime = original_time
+
+            names = ", ".join(os.path.basename(os.path.dirname(resolved)) for _, resolved in readers)
+            when = (
+                f"time steps {indexes[0]} to {indexes[-1]}" if len(indexes) > 1
+                else f"time step {indexes[0]} (time {values[indexes[0]]:g})" if indexes[0] is not None
+                else "the data"
+            )
+            return True, (
+                f"Compared {names} colored by '{field}' (range {lut.RGBPoints[0]:g} to {lut.RGBPoints[-4]:g}) "
+                f"at {when}; {len(images)} image(s)."
+            ), images
+        except Exception as e:
+            self.logger.error(f"Error comparing runs: {str(e)}")
+            return False, f"Error comparing runs: {str(e)}", []
+        finally:
+            for label in labels:
+                Delete(label)
+            for view in views:
+                Delete(view)
+            if layout is not None:
+                RemoveLayout(layout)
+            for reader, resolved in readers:
+                Delete(reader)
+                if resolved != self._loaded_path:
+                    femzip_reader.release(resolved)
+            if main_view is not None:
+                SetActiveView(main_view)
+
     def list_data_files(self, pattern="**/*", limit=200):
         """
         List loadable files below the data directories.
@@ -1525,6 +1683,7 @@ class ParaViewManager:
                     except Exception:
                         pass
             self.original_source = None
+            self._loaded_path = None
             self._data_folder = ""
             femzip_reader.release_all()
             Render()
