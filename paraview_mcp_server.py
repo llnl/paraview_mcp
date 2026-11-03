@@ -21,6 +21,7 @@ import os
 import sys
 import logging
 import argparse
+import functools
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -62,6 +63,14 @@ When using ParaView through this interface, please follow these guidelines:
 7. For values at specific places, use get_data_info for bounds and ranges, sample_over_line for a profile along a line, and probe_over_time for a node over time. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
 
 """
+
+# Appended to the prompt depending on where the server renders.
+HEADLESS_NOTE = """
+8. Rendering is headless: no ParaView window shows these changes. The user sees results only in the screenshots, animations and charts the tools return.
+"""
+SHARED_GUI_NOTE = """
+8. This server shares its pipeline with a ParaView server, usually with a ParaView GUI connected. Loaded data, filters, coloring and the time step appear in that GUI, but its camera is its own: the GUI does not follow rotate_camera or reset_camera. Data, filters, colors and the time step the user sets in the GUI are picked up before each tool call, so get_pipeline lists them and results refer to the GUI's time step.
+"""
     
 logger = logging.getLogger("pv_external_mcp")
 
@@ -71,11 +80,23 @@ pv_manager = ParaViewManager()
 # Initialize FastMCP server for Claude Desktop integration with default prompt
 mcp = FastMCP("ParaView", instructions=default_prompt)
 
+
+def tool(**options):
+    """Register an MCP tool that first picks up changes made in a shared GUI."""
+    def decorator(function):
+        @functools.wraps(function)
+        def wrapper(*args, **kwargs):
+            pv_manager.follow_gui()
+            return function(*args, **kwargs)
+        return mcp.tool(**options)(wrapper)
+    return decorator
+
+
 # ============================================================================
 # MCP Tools for ParaView
 # ============================================================================
 
-@mcp.tool()
+@tool()
 def load_data(file_path: str) -> str:
     """
     Load data from a file into ParaView.
@@ -92,7 +113,7 @@ def load_data(file_path: str) -> str:
     else:
         return message
 
-@mcp.tool()
+@tool()
 def save_contour_as_stl(stl_filename: str = "contour.stl") -> str:
     """
     Save the currently active contour (or any surface/mesh source) as an STL file
@@ -107,7 +128,7 @@ def save_contour_as_stl(stl_filename: str = "contour.stl") -> str:
     success, message, path = pv_manager.save_contour_as_stl(stl_filename)
     return message
 
-@mcp.tool()
+@tool()
 def create_source(source_type: str) -> str:
     """
     Create a new geometric source.
@@ -124,7 +145,7 @@ def create_source(source_type: str) -> str:
     else:
         return message
 
-@mcp.tool()
+@tool()
 def create_isosurface(value: float, field: str = None) -> str:
     """
     Create an isosurface visualization of the active source.
@@ -143,7 +164,7 @@ def create_isosurface(value: float, field: str = None) -> str:
     else:
         return message
 
-@mcp.tool()
+@tool()
 def create_slice(origin_x: float = None, origin_y: float = None, origin_z: float = None,
                  normal_x: float = 0, normal_y: float = 0, normal_z: float = 1) -> str:
     """
@@ -169,7 +190,7 @@ def create_slice(origin_x: float = None, origin_y: float = None, origin_z: float
     # Return either an error message or a success message including the slice's name
     return message if success else f"Error creating slice: {message}"
 
-@mcp.tool()
+@tool()
 def toggle_volume_rendering(enable: bool = True) -> str:
     """
     Toggle the visibility of volume rendering for the active source.
@@ -190,7 +211,7 @@ def toggle_volume_rendering(enable: bool = True) -> str:
     else:
         return message
 
-@mcp.tool()
+@tool()
 def toggle_visibility(enable: bool = True) -> str:
     """
     Toggle the visibility for the active source.
@@ -212,7 +233,7 @@ def toggle_visibility(enable: bool = True) -> str:
         return message
 
 
-@mcp.tool()
+@tool()
 def set_active_source(name: str) -> str:
     """
     Set the active pipeline object by its name.
@@ -225,7 +246,7 @@ def set_active_source(name: str) -> str:
     success, message = pv_manager.set_active_source(name)
     return message
 
-@mcp.tool()
+@tool()
 def get_active_source_names_by_type(source_type: str = None) -> str:
     """
     Get a list of source names filtered by their type.
@@ -246,7 +267,7 @@ def get_active_source_names_by_type(source_type: str = None) -> str:
     else:
         return message
 
-# @mcp.tool()
+# @tool()
 # def edit_volume_opacity(field_name: str, opacity_points: list) -> str:
 #     """
 #     Edit ONLY the opacity transfer function for the specified field,
@@ -266,7 +287,7 @@ def get_active_source_names_by_type(source_type: str = None) -> str:
 #     return message
 
 # Compatible with OpenAI tool using
-@mcp.tool()
+@tool()
 def edit_volume_opacity(field_name: str, opacity_points: list[dict[str, float]]) -> str:
     """
     Edit ONLY the opacity transfer function for the specified field.
@@ -283,7 +304,7 @@ def edit_volume_opacity(field_name: str, opacity_points: list[dict[str, float]])
     success, message = pv_manager.edit_volume_opacity(field_name, formatted_points)
     return message
 
-# @mcp.tool()
+# @tool()
 # def set_color_map(field_name: str, color_points: list) -> str:
 #     """
 #     Sets the color transfer function for the specified field.
@@ -303,7 +324,7 @@ def edit_volume_opacity(field_name: str, opacity_points: list[dict[str, float]])
 #     return message
 
 # Compatible with OpenAI tool using
-@mcp.tool()
+@tool()
 def set_color_map(field_name: str, color_points: list[dict]) -> str:
     """
     Sets the color transfer function for the specified field.
@@ -335,7 +356,7 @@ def set_color_map(field_name: str, color_points: list[dict]) -> str:
     return message
 
 
-@mcp.tool()
+@tool()
 def color_by(field: str, component: int = -1, range_min: float | None = None, range_max: float | None = None) -> str:
     """
     Color the active visualization by a specific field.
@@ -355,7 +376,7 @@ def color_by(field: str, component: int = -1, range_min: float | None = None, ra
     success, message = pv_manager.color_by(field, component, range_min, range_max)
     return message
 
-@mcp.tool()
+@tool()
 def compute_surface_area() -> str:
     """
     Compute the surface area of the currently active dataset.
@@ -364,7 +385,7 @@ def compute_surface_area() -> str:
     success, message, area_value = pv_manager.compute_surface_area()
     return message
 
-# @mcp.tool()
+# @tool()
 # def set_color_map_preset(preset_name: str) -> str:
 #     """
 #     Set the color map (lookup table) for the current visualization.
@@ -379,7 +400,7 @@ def compute_surface_area() -> str:
 #     success, message = pv_manager.set_color_map(preset_name)
 #     return message
 
-@mcp.tool()
+@tool()
 def set_representation_type(rep_type: str) -> str:
     """
     Set the representation type for the active source.
@@ -395,7 +416,7 @@ def set_representation_type(rep_type: str) -> str:
     success, message = pv_manager.set_representation_type(rep_type)
     return message
 
-@mcp.tool()
+@tool()
 def get_pipeline() -> str:
     """
     Get the current pipeline structure.
@@ -406,7 +427,7 @@ def get_pipeline() -> str:
     success, message = pv_manager.get_pipeline()
     return message
 
-@mcp.tool()
+@tool()
 def get_available_arrays() -> str:
     """
     Get a list of available arrays in the active source.
@@ -419,7 +440,7 @@ def get_available_arrays() -> str:
     success, message = pv_manager.get_available_arrays()
     return message
 
-@mcp.tool()
+@tool()
 def create_streamline(seed_point_number: int, vector_field: str = None,
                      integration_direction: str = "BOTH", max_steps: int = 1000,
                      initial_step: float = 0.1, maximum_step: float = 50.0) -> str:
@@ -455,7 +476,7 @@ def create_streamline(seed_point_number: int, vector_field: str = None,
     else:
         return message
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def get_screenshot(width: int = 1280, height: int = 720) -> Image | str:
     """
     Capture a screenshot of the current view and display it in chat.
@@ -476,7 +497,7 @@ def get_screenshot(width: int = 1280, height: int = 720) -> Image | str:
     finally:
         Path(img_path).unlink(missing_ok=True)
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def render_animation(start_index: int = 0, end_index: int = -1, max_frames: int = 30, width: int = 800, height: int = 450) -> list[Image | str] | str:
     """
     Render the current view over time and show it to the user as an animation
@@ -518,7 +539,7 @@ def _series_resource(payload: dict) -> EmbeddedResource:
         ),
     )
 
-@mcp.tool()
+@tool()
 def list_time_series(run: str) -> str:
     """
     List the time series of an LS-DYNA run (binout history output): categories
@@ -537,7 +558,7 @@ def list_time_series(run: str) -> str:
     except Exception as e:
         return f"Error listing time series: {e}"
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def get_time_series(runs: list[str], category: str, variables: list[str], entities: list[str] | None = None, title: str | None = None) -> list | str:
     """
     Show time series of one or more runs to the user as an interactive chart.
@@ -561,7 +582,7 @@ def get_time_series(runs: list[str], category: str, variables: list[str], entiti
         return f"Error reading time series: {e}"
     return [summary, _series_resource(payload)]
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def compare_runs(file_paths: list[str], field: str, range_min: float | None = None, range_max: float | None = None, time_index: int = -1, frames: int = 1, width: int = 1200, height: int = 500) -> list[Image | str] | str:
     """
     Show 2 to 4 runs side by side with the same coloring, color range, camera
@@ -587,7 +608,7 @@ def compare_runs(file_paths: list[str], field: str, range_min: float | None = No
         return message
     return [message, *(Image(data=image, format="png") for image in images)]
 
-@mcp.tool()
+@tool()
 def get_data_info() -> str:
     """
     Describe the active data at the current time: point and cell counts,
@@ -600,7 +621,7 @@ def get_data_info() -> str:
     success, message = pv_manager.get_data_info()
     return message
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def sample_over_line(point1: list[float], point2: list[float], field: str, resolution: int = 200, radius: float = 50.0) -> list | str:
     """
     Show the user a chart of an array along a straight line through the
@@ -623,7 +644,7 @@ def sample_over_line(point1: list[float], point2: list[float], field: str, resol
         return message
     return [message, _series_resource(payload)]
 
-@mcp.tool(structured_output=False)
+@tool(structured_output=False)
 def probe_over_time(field: str, point: list[float] | None = None, start_index: int = 0, end_index: int = -1, max_samples: int = 60) -> list | str:
     """
     Show the user a chart of an array over time at one node of the loaded
@@ -647,7 +668,7 @@ def probe_over_time(field: str, point: list[float] | None = None, start_index: i
         return message
     return [message, _series_resource(payload)]
 
-@mcp.tool()
+@tool()
 def list_parts(pattern: str | None = None) -> str:
     """
     List the parts of the loaded LS-DYNA d3plot with id, name and element count.
@@ -661,7 +682,7 @@ def list_parts(pattern: str | None = None) -> str:
     success, message = pv_manager.list_parts(pattern)
     return message
 
-@mcp.tool()
+@tool()
 def show_parts(parts: list[str], mode: str = "only") -> str:
     """
     Show only some parts of the loaded LS-DYNA d3plot ("only"), or draw them
@@ -678,7 +699,7 @@ def show_parts(parts: list[str], mode: str = "only") -> str:
     success, message = pv_manager.show_parts(parts, mode)
     return message
 
-@mcp.tool()
+@tool()
 def show_all_parts() -> str:
     """
     Show all parts again after show_parts.
@@ -689,7 +710,7 @@ def show_all_parts() -> str:
     success, message = pv_manager.show_all_parts()
     return message
 
-@mcp.tool()
+@tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
     List files in the data directories that can be passed to load_data.
@@ -706,7 +727,7 @@ def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
         return message
     return f"{message}:\n" + "\n".join(paths)
 
-@mcp.tool()
+@tool()
 def get_timesteps() -> str:
     """
     Describe the time steps of the loaded data (count, range and current time).
@@ -717,7 +738,7 @@ def get_timesteps() -> str:
     success, message = pv_manager.get_timesteps()
     return message
 
-@mcp.tool()
+@tool()
 def set_time(index: int | None = None, value: float | None = None) -> str:
     """
     Show the loaded data at one time step.
@@ -732,7 +753,7 @@ def set_time(index: int | None = None, value: float | None = None) -> str:
     success, message = pv_manager.set_time(index, value)
     return message
 
-@mcp.tool()
+@tool()
 def reset_session() -> str:
     """
     Remove all loaded data and filters to start a new analysis.
@@ -743,7 +764,7 @@ def reset_session() -> str:
     success, message = pv_manager.reset_session()
     return message
     
-@mcp.tool()
+@tool()
 def rotate_camera(azimuth: float = 30.0, elevation: float = 0.0) -> str:
     """
     Rotate the camera by specified angles.
@@ -758,7 +779,7 @@ def rotate_camera(azimuth: float = 30.0, elevation: float = 0.0) -> str:
     success, message = pv_manager.rotate_camera(azimuth, elevation)
     return message
 
-@mcp.tool()
+@tool()
 def reset_camera() -> str:
     """
     Reset the camera to show all data.
@@ -769,7 +790,7 @@ def reset_camera() -> str:
     success, message = pv_manager.reset_camera()
     return message
 
-# @mcp.tool()
+# @tool()
 # def plot_over_line(point1: list = None, point2: list = None, resolution: int = 100) -> str:
 #     """
 #     Create a 'Plot Over Line' filter to sample data along a line between two points.
@@ -786,7 +807,7 @@ def reset_camera() -> str:
 #     return message
 
 # Compatible with OpenAI tool using
-@mcp.tool()
+@tool()
 def plot_over_line(point1: list[float] = None, point2: list[float] = None, resolution: int = 100) -> str:
     """
     Create a 'Plot Over Line' filter to sample data along a line between two points.
@@ -802,7 +823,7 @@ def plot_over_line(point1: list[float] = None, point2: list[float] = None, resol
     success, message, plot_filter = pv_manager.plot_over_line(point1, point2, resolution)
     return message
 
-@mcp.tool()
+@tool()
 def warp_by_vector(vector_field: str = None, scale_factor: float = 1.0) -> str:
     """
     Apply the 'Warp By Vector' filter to the active source.
@@ -817,7 +838,7 @@ def warp_by_vector(vector_field: str = None, scale_factor: float = 1.0) -> str:
     success, message, warp_filter = pv_manager.warp_by_vector(vector_field, scale_factor)
     return message
 
-@mcp.tool()
+@tool()
 def list_commands() -> str:
     """
     List all available commands in this ParaView MCP server.
@@ -894,6 +915,7 @@ def main():
 
     # Connect to ParaView
     pv_manager.connect(args.server, args.port)
+    mcp._mcp_server.instructions = default_prompt + (HEADLESS_NOTE if args.server == "builtin" else SHARED_GUI_NOTE)
 
     if args.transport == "streamable-http":
         mcp.settings.host = args.http_host

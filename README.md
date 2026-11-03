@@ -65,7 +65,10 @@ Start `pvserver --multi-clients --server-port=11111` before Claude Code, which
 connects once at startup. `./start_gui.sh` starts that pvserver with the d3plot
 reader on its Python path and a ParaView GUI connected to it, so the GUI shows
 what the MCP server loads. Run it from a regular terminal: ParaView's Qt does
-not start from the terminal of the VS Code snap.
+not start from the terminal of the VS Code snap. Before each tool call the MCP
+server picks up what the GUI changed, including its time step; the GUI and the
+MCP server keep separate cameras. The server instructions tell the model
+whether a GUI shows its changes (`--server builtin` renders headless).
 
 ## Headless server
 

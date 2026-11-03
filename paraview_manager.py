@@ -1302,6 +1302,23 @@ class ParaViewManager:
             self.logger.error(f"Error creating stream tracer: {str(e)}")
             return False, f"Error creating stream tracer: {str(e)}", None, ""
 
+    def follow_gui(self):
+        """
+        Pick up what a ParaView GUI changed on the shared server, including
+        its time step. Without this, data ranges and probes of this client use
+        the time it last set itself. Does nothing without collaboration.
+        """
+        if not self.collaboration:
+            return
+        from paraview.collaboration import processServerEvents
+        from paraview.simple import GetAnimationScene, GetTimeKeeper
+
+        processServerEvents()
+        time = GetAnimationScene().AnimationTime
+        keeper = GetTimeKeeper()
+        if keeper.Time != time:
+            keeper.Time = time
+
     def _screenshot_view(self):
         """
         The render view screenshots show: the GUI's view when collaborating,
@@ -1310,9 +1327,7 @@ class ParaViewManager:
         Returns:
             tuple: (success, message, view)
         """
-        if self.collaboration:
-            from paraview.collaboration import processServerEvents
-            processServerEvents()
+        self.follow_gui()
         from paraview import servermanager
         from paraview.simple import SetActiveView, GetActiveViewOrCreate
 
