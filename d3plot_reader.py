@@ -20,6 +20,8 @@ Output (vtkUnstructuredGrid, eroded elements removed):
 """
 
 import os
+import sys
+import types
 
 import numpy as np
 from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
@@ -48,10 +50,31 @@ def is_femzip_file(path):
         return False
 
 
+def _import_lasso_dyna():
+    """
+    Import lasso.dyna.
+
+    Its binout module imports h5py, which fails inside a pvserver linked
+    against another HDF5 than the h5py wheel. d3plots do not need h5py, so an
+    empty module stands in for it there.
+    """
+    try:
+        import h5py  # noqa: F401
+    except ImportError:
+        pass
+    except Exception:
+        for name in [name for name in sys.modules if name == "h5py" or name.startswith("h5py.")]:
+            del sys.modules[name]
+        sys.modules["h5py"] = types.ModuleType("h5py")
+    import lasso.dyna
+
+    return lasso.dyna
+
+
 def is_d3plot(path):
     """True for d3plot files when lasso-python is installed to read them."""
     try:
-        import lasso.dyna  # noqa: F401 -- optional dependency
+        _import_lasso_dyna()
     except ImportError:
         return False
     return os.path.basename(str(path)) == "d3plot" or is_femzip_file(path)
@@ -60,8 +83,7 @@ def is_d3plot(path):
 def _arrays(path):
     """Result arrays of a d3plot (decompressed if needed), read once per file."""
     if path not in _ARRAYS:
-        from lasso.dyna import D3plot
-
+        D3plot = _import_lasso_dyna().D3plot
         _ARRAYS[path] = D3plot(path, use_femzip=is_femzip_file(path)).arrays
     return _ARRAYS[path]
 
