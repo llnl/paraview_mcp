@@ -57,11 +57,9 @@ When using ParaView through this interface, please follow these guidelines:
 
 5. Call get_screenshot to show the user the current view after changing it. For transient results, render_animation shows how the result evolves over time. compare_runs shows design variants side by side.
 
-6. LS-DYNA d3plot results provide e.g. the point arrays 'Deflection' (displacement) and 'Deflected Coordinates', and the cell arrays 'EffPlastStrn' (effective plastic strain), 'Stress' and 'InternalEnergy'. 'EffPlastStrn' can contain huge outliers from parts without plasticity; color it with an explicit range, e.g. range_min=0 and range_max=0.3.
+6. LS-DYNA d3plot results, plain or FEMZIP-compressed, provide the point arrays 'Deflection' (displacement) and 'UserID' (node ids) and the cell arrays 'EffPlastStrn' (effective plastic strain of shells; other elements have none) and 'PartID'. Eroded elements are removed.
 
-7. FEMZIP-compressed d3plot files are loaded like other files. They provide only the point array 'Deflection' and the cell arrays 'EffPlastStrn' (shells) and 'PartID'; eroded elements are removed.
-
-8. For values at specific places, use get_data_info for bounds and ranges, sample_over_line for a profile along a line, and probe_over_time for a node over time. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
+7. For values at specific places, use get_data_info for bounds and ranges, sample_over_line for a profile along a line, and probe_over_time for a node over time. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
 
 """
     

@@ -11,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from paraview.simple import *
-import femzip_reader
+import d3plot_reader
 
 # Opens a file in a separate process. Some readers never return on broken
 # input (e.g. LS-DYNA d3plot files whose state files are missing), which would
@@ -188,19 +188,19 @@ class ParaViewManager:
         if not success:
             return False, message, None, None
         file_path = str(resolved)
-        # ParaView's LS-DYNA reader cannot read FEMZIP files and would
-        # hang in the probe, so they are recognized first.
-        is_femzip = femzip_reader.is_femzip_file(file_path)
-        if not is_femzip:
+        # ParaView's LS-DYNA reader cannot read FEMZIP files (it would hang
+        # in the probe) and misreads plain ones, so d3plots go to lasso-python.
+        is_d3plot = d3plot_reader.is_d3plot(file_path)
+        if not is_d3plot:
             success, message = self._probe_readable(file_path)
             if not success:
                 return False, message, None, None
 
         _, file_extension = os.path.splitext(file_path)
         file_name = os.path.basename(file_path)
-        if is_femzip:
+        if is_d3plot:
             # Named after the run folder, like "Exp_308 d3plot".
-            reader = femzip_reader.open_femzip_d3plot(
+            reader = d3plot_reader.open_d3plot(
                 file_path,
                 registration_name=f"{os.path.basename(os.path.dirname(file_path))} {file_name}",
             )
@@ -1561,7 +1561,7 @@ class ParaViewManager:
             for reader, resolved in readers:
                 Delete(reader)
                 if resolved != self._loaded_path:
-                    femzip_reader.release(resolved)
+                    d3plot_reader.release(resolved)
             if main_view is not None:
                 SetActiveView(main_view)
 
@@ -1981,7 +1981,7 @@ class ParaViewManager:
             self.original_source = None
             self._loaded_path = None
             self._data_folder = ""
-            femzip_reader.release_all()
+            d3plot_reader.release_all()
             if GetActiveView() is not None:
                 Render()
             return True, "Removed all data and filters."

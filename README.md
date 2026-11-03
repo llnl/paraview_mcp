@@ -95,13 +95,16 @@ Data series are returned as an embedded resource of type
 `{"title", "x": {"label", "values"}, "series": [{"name", "values"}]}`, plus a
 text summary for the model.
 
-### FEMZIP-compressed LS-DYNA results
+### LS-DYNA d3plot results
 
-`load_data` reads FEMZIP-compressed d3plot files (which ParaView's LS-DYNA
-reader cannot open) through `femzip_reader.py`, using the SIDACT FEMZIP library
-bundled with lasso-python 1.5.2. They provide the deformed mesh per time step
-without eroded elements, the point array `Deflection` and the cell arrays
-`EffPlastStrn` (shells) and `PartID`. Install it next to the requirements:
+`load_data` reads d3plot files through `d3plot_reader.py` with lasso-python
+1.5.2 instead of ParaView's LS-DYNA reader. ParaView 5.11 cannot open
+FEMZIP-compressed d3plots and misreads the state layout of plain ones (it
+reports stresses the files do not contain and junk plastic strains). FEMZIP
+files are decompressed with the SIDACT library bundled with lasso-python. Both
+provide the deformed mesh per time step without eroded elements, the point
+arrays `Deflection` and `UserID` and the cell arrays `EffPlastStrn` (shells)
+and `PartID`. Install lasso-python next to the requirements:
 
 ```shell
 uv pip install --python .venv/bin/python --no-deps "lasso-python==1.5.2"
@@ -109,7 +112,8 @@ uv pip install --python .venv/bin/python rich psutil h5py "pandas<2.3" "numpy==1
 ```
 
 Pin numpy to the version of the system ParaView (`python3 -c "import numpy; print(numpy.__version__)"`).
-Without lasso-python, FEMZIP files are rejected after the probe timeout.
+Without lasso-python, d3plots go to ParaView's reader and FEMZIP files are
+rejected after the probe timeout.
 
 The Docker image runs the headless server on Mesa inside Xvfb:
 

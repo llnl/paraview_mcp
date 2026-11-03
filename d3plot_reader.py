@@ -1,21 +1,25 @@
 """
-ParaView reader for FEMZIP-compressed LS-DYNA d3plot files.
+ParaView source for LS-DYNA d3plot files, plain or FEMZIP-compressed.
 
-FEMZIP (SIDACT) keeps the d3plot name and header but compresses the results,
-which ParaView's LS-DYNA reader cannot read. This reader decompresses them with
-lasso-python's FEMZIP API (lasso-python 1.5.x bundles the SIDACT library) and
-builds the deformed mesh of the requested time step.
+ParaView 5.11's LS-DYNA reader cannot open FEMZIP files (SIDACT keeps the
+d3plot name and header but compresses the results) and misreads the state
+layout of these runs: it reports stresses the files do not contain and junk
+plastic strains in some parts. This source reads both kinds with
+lasso-python, which decompresses FEMZIP with the SIDACT library bundled in
+lasso-python 1.5.x, and builds the deformed mesh of the requested time step.
 
 Use it from paraview.simple; the source behaves like a reader with time steps:
 
-    from femzip_reader import open_femzip_d3plot
-    reader = open_femzip_d3plot("/data/run/d3plot")
+    from d3plot_reader import open_d3plot
+    reader = open_d3plot("/data/run/d3plot")
 
 Output (vtkUnstructuredGrid, eroded elements removed):
     points        deformed coordinates of the time step
     point arrays  Deflection (displacement from the initial state), UserID (node ids)
     cell arrays   EffPlastStrn (shells; NaN for other elements), PartID
 """
+
+import os
 
 import numpy as np
 from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
@@ -44,12 +48,21 @@ def is_femzip_file(path):
         return False
 
 
+def is_d3plot(path):
+    """True for d3plot files when lasso-python is installed to read them."""
+    try:
+        import lasso.dyna  # noqa: F401 -- optional dependency
+    except ImportError:
+        return False
+    return os.path.basename(str(path)) == "d3plot" or is_femzip_file(path)
+
+
 def _arrays(path):
-    """Decompressed result arrays of a FEMZIP d3plot, read once per file."""
+    """Result arrays of a d3plot (decompressed if needed), read once per file."""
     if path not in _ARRAYS:
         from lasso.dyna import D3plot
 
-        _ARRAYS[path] = D3plot(path, use_femzip=True).arrays
+        _ARRAYS[path] = D3plot(path, use_femzip=is_femzip_file(path)).arrays
     return _ARRAYS[path]
 
 
@@ -91,13 +104,13 @@ def request_data(algorithm, path):
     output.GetInformation().Set(output.DATA_TIME_STEP(), float(timesteps[step]))
 
 
-def open_femzip_d3plot(path, registration_name=None):
-    """Create a pipeline source that reads a FEMZIP d3plot."""
+def open_d3plot(path, registration_name=None):
+    """Create a pipeline source that reads a d3plot."""
     from paraview.simple import ProgrammableSource
 
     path = str(path)
     _arrays(path)  # decompress now so errors surface when loading
-    call = f"import femzip_reader; femzip_reader.{{}}(self, {path!r})"
+    call = f"import d3plot_reader; d3plot_reader.{{}}(self, {path!r})"
     return ProgrammableSource(
         registrationName=registration_name,
         OutputDataSetType="vtkUnstructuredGrid",

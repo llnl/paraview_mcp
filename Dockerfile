@@ -26,7 +26,7 @@ RUN python3 -m venv --system-site-packages /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt \
     && /opt/venv/bin/pip install --no-cache-dir --no-deps "lasso-python==1.5.2" \
     && /opt/venv/bin/pip install --no-cache-dir rich psutil h5py "pandas<2.3" "numpy==1.26.4"
-COPY paraview_manager.py paraview_mcp_server.py femzip_reader.py time_series.py ./
+COPY paraview_manager.py paraview_mcp_server.py d3plot_reader.py time_series.py ./
 
 RUN mkdir -p /data /output && chown ubuntu:ubuntu /output
 USER ubuntu
