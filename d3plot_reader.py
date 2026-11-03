@@ -90,7 +90,28 @@ def request_information(algorithm, path):
         out_info.Append(executive.TIME_RANGE(), timesteps[-1])
 
 
-def request_data(algorithm, path):
+def part_table(path):
+    """Parts of a d3plot as (id, name, element count), ordered by id."""
+    arrays = _arrays(path)
+    part_ids = arrays["part_ids"]
+    title_ids = [int(i) for i in arrays.get("part_titles_ids", [])]
+    # Title ids are either part ids or 1-based positions in part_ids.
+    if title_ids and not set(title_ids) <= set(int(i) for i in part_ids):
+        title_ids = [int(part_ids[i - 1]) for i in title_ids if 0 < i <= len(part_ids)]
+    names = {
+        part_id: title.decode(errors="replace").strip() if isinstance(title, bytes) else str(title).strip()
+        for part_id, title in zip(title_ids, arrays.get("part_titles", []))
+    }
+    counts = {}
+    for kind in ("shell", "solid", "beam", "tshell"):
+        indexes = arrays.get(f"element_{kind}_part_indexes")
+        if indexes is not None and len(indexes):
+            for part_id, count in zip(*np.unique(part_ids[indexes], return_counts=True)):
+                counts[int(part_id)] = counts.get(int(part_id), 0) + int(count)
+    return [(part_id, names.get(part_id, ""), counts.get(part_id, 0)) for part_id in sorted(int(i) for i in part_ids)]
+
+
+def request_data(algorithm, path, parts=None):
     """Produce the mesh of the requested time step (ProgrammableSource script)."""
     arrays = _arrays(path)
     executive = algorithm.GetExecutive()
@@ -100,28 +121,37 @@ def request_data(algorithm, path):
     if out_info.Has(executive.UPDATE_TIME_STEP()):
         step = int(np.abs(timesteps - out_info.Get(executive.UPDATE_TIME_STEP())).argmin())
     output = algorithm.GetOutput()
-    output.ShallowCopy(_build_grid(arrays, step))
+    output.ShallowCopy(_build_grid(arrays, step, parts))
     output.GetInformation().Set(output.DATA_TIME_STEP(), float(timesteps[step]))
 
 
-def open_d3plot(path, registration_name=None):
-    """Create a pipeline source that reads a d3plot."""
+def _data_script(path, parts):
+    return f"import d3plot_reader; d3plot_reader.request_data(self, {path!r}, {parts!r})"
+
+
+def open_d3plot(path, registration_name=None, parts=None):
+    """Create a pipeline source that reads a d3plot, optionally only some part ids."""
     from paraview.simple import ProgrammableSource
 
     path = str(path)
     _arrays(path)  # decompress now so errors surface when loading
-    call = f"import d3plot_reader; d3plot_reader.{{}}(self, {path!r})"
     return ProgrammableSource(
         registrationName=registration_name,
         OutputDataSetType="vtkUnstructuredGrid",
-        ScriptRequestInformation=call.format("request_information"),
-        Script=call.format("request_data"),
+        ScriptRequestInformation=f"import d3plot_reader; d3plot_reader.request_information(self, {path!r})",
+        Script=_data_script(path, sorted(parts) if parts is not None else None),
     )
 
 
-def _build_grid(arrays, step):
-    """Mesh of one time step with the elements that are still alive."""
+def set_parts(source, path, parts):
+    """Limit a source of open_d3plot to part ids; None shows all parts."""
+    source.Script = _data_script(str(path), sorted(parts) if parts is not None else None)
+
+
+def _build_grid(arrays, step, parts=None):
+    """Mesh of one time step with the elements that are still alive (and in parts)."""
     part_ids = arrays["part_ids"]
+    wanted = None if parts is None else np.asarray(list(parts))
     # (kind, VTK cell type, node columns used); beams keep their two end nodes.
     kinds = [("shell", VTK_QUAD, 4), ("solid", VTK_HEXAHEDRON, 8), ("beam", VTK_LINE, 2)]
     connectivity, cell_types, strain, parts = [], [], [], []
@@ -136,6 +166,8 @@ def _build_grid(arrays, step):
             if alive_key in arrays
             else np.ones(len(nodes), dtype=bool)
         )
+        if wanted is not None:
+            alive = alive & np.isin(part_ids[arrays[f"element_{kind}_part_indexes"]], wanted)
         nodes = nodes[alive, :n_nodes]
         used[nodes.ravel()] = True
         connectivity.append(np.hstack([np.full((len(nodes), 1), n_nodes), nodes]).ravel())

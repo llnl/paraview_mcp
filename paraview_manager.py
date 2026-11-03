@@ -40,6 +40,8 @@ class ParaViewManager:
         # which is needed for operations like volume rendering.
         self.original_source = None
         self._loaded_path = None
+        # (source, coloring) of the parts show_parts highlights
+        self._highlight = None
         self._data_folder = ""
         # True when connected to a pvserver shared with a ParaView GUI.
         self.collaboration = False
@@ -1861,6 +1863,140 @@ class ParaViewManager:
             self.logger.error(f"Error probing over time: {str(e)}")
             return False, f"Error probing over time: {str(e)}", None
 
+    @staticmethod
+    def _color_keeping_range(display, view, coloring):
+        """Color a display by (location, field); a range fixed by color_by survives."""
+        from paraview.simple import ColorBy, GetColorTransferFunction, GetOpacityTransferFunction
+
+        location, field = coloring[0], coloring[1]
+        lut = GetColorTransferFunction(field)
+        fixed = lut.AutomaticRescaleRangeMode == "Never"
+        low, high = lut.RGBPoints[0], lut.RGBPoints[-4]
+        ColorBy(display, (location, field))
+        display.SetScalarBarVisibility(view, True)
+        if fixed:
+            # ColorBy rescales to the data range.
+            lut.RescaleTransferFunction(low, high)
+            GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
+
+    def _loaded_d3plot(self):
+        """Path of the loaded d3plot, or None when other data is loaded."""
+        if self.original_source is None or self._loaded_path is None:
+            return None
+        return self._loaded_path if d3plot_reader.is_d3plot(self._loaded_path) else None
+
+    def _match_parts(self, path, parts):
+        """Part ids matching ids, names or parts of names (case-insensitive)."""
+        table = d3plot_reader.part_table(path)
+        matched = []
+        for item in parts:
+            text = str(item).strip().lower()
+            hits = [part_id for part_id, name, _ in table if text in (str(part_id), name.lower())]
+            hits = hits or [part_id for part_id, name, _ in table if text and text in name.lower()]
+            if not hits:
+                raise ValueError(f"No part matches {item!r}; use list_parts to see the parts.")
+            matched.extend(part_id for part_id in hits if part_id not in matched)
+        return matched, {part_id: name for part_id, name, _ in table}
+
+    def list_parts(self, pattern=None):
+        """
+        List the parts of the loaded d3plot.
+
+        Args:
+            pattern: Part of a name to filter by (case-insensitive)
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            path = self._loaded_d3plot()
+            if path is None:
+                return False, "Error: Load an LS-DYNA d3plot first."
+            table = d3plot_reader.part_table(path)
+            if pattern:
+                table = [row for row in table if pattern.lower() in row[1].lower() or pattern == str(row[0])]
+            lines = [f"{part_id} {name or '(no name)'}: {count} elements" for part_id, name, count in table]
+            return True, f"{len(lines)} parts:\n" + "\n".join(lines)
+        except Exception as e:
+            self.logger.error(f"Error listing parts: {str(e)}")
+            return False, f"Error listing parts: {str(e)}"
+
+    def show_parts(self, parts, mode="only"):
+        """
+        Show only some parts of the loaded d3plot, or highlight them in front of
+        the translucent, gray rest of the model.
+
+        Args:
+            parts: Part ids, names or parts of names
+            mode: "only" or "highlight"
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            from paraview.simple import ColorBy, GetActiveViewOrCreate, GetDisplayProperties, Render, SetActiveSource, Show
+
+            path = self._loaded_d3plot()
+            if path is None:
+                return False, "Error: Load an LS-DYNA d3plot first."
+            if mode not in ("only", "highlight"):
+                return False, "Error: mode must be 'only' or 'highlight'."
+            ids, names = self._match_parts(path, parts)
+            self.show_all_parts()
+            view = GetActiveViewOrCreate("RenderView")
+            display = GetDisplayProperties(self.original_source, view)
+            if mode == "only":
+                d3plot_reader.set_parts(self.original_source, path, ids)
+            else:
+                coloring = list(display.ColorArrayName)
+                selection = d3plot_reader.open_d3plot(path, registration_name="Highlighted parts", parts=ids)
+                selection_display = Show(selection, view)
+                if coloring[1]:
+                    self._color_keeping_range(selection_display, view, coloring)
+                ColorBy(display, None)
+                display.AmbientColor = display.DiffuseColor = [0.7, 0.7, 0.7]
+                display.Opacity = 0.15
+                self._highlight = (selection, coloring)
+                SetActiveSource(self.original_source)
+            Render(view)
+            listed = ", ".join(f"{part_id} {names.get(part_id, '')}".strip() for part_id in ids[:20])
+            more = f" and {len(ids) - 20} more" if len(ids) > 20 else ""
+            verb = "Showing only" if mode == "only" else "Highlighting"
+            return True, f"{verb} {len(ids)} parts: {listed}{more}."
+        except Exception as e:
+            self.logger.error(f"Error showing parts: {str(e)}")
+            return False, f"Error showing parts: {str(e)}"
+
+    def show_all_parts(self):
+        """
+        Show all parts again after show_parts.
+
+        Returns:
+            tuple: (success, message)
+        """
+        try:
+            from paraview.simple import Delete, GetActiveViewOrCreate, GetDisplayProperties, Render
+
+            path = self._loaded_d3plot()
+            if path is None:
+                return False, "Error: Load an LS-DYNA d3plot first."
+            d3plot_reader.set_parts(self.original_source, path, None)
+            view = GetActiveViewOrCreate("RenderView")
+            display = GetDisplayProperties(self.original_source, view)
+            highlight = self._highlight
+            if highlight is not None:
+                selection, coloring = highlight
+                Delete(selection)
+                display.Opacity = 1.0
+                if coloring[1]:
+                    self._color_keeping_range(display, view, coloring)
+                self._highlight = None
+            Render(view)
+            return True, "Showing all parts."
+        except Exception as e:
+            self.logger.error(f"Error showing all parts: {str(e)}")
+            return False, f"Error showing all parts: {str(e)}"
+
     def list_data_files(self, pattern="**/*", limit=200):
         """
         List loadable files below the data directories.
@@ -1980,6 +2116,7 @@ class ParaViewManager:
                         pass
             self.original_source = None
             self._loaded_path = None
+            self._highlight = None
             self._data_folder = ""
             d3plot_reader.release_all()
             if GetActiveView() is not None:

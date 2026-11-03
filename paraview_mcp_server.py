@@ -57,7 +57,7 @@ When using ParaView through this interface, please follow these guidelines:
 
 5. Call get_screenshot to show the user the current view after changing it. For transient results, render_animation shows how the result evolves over time. compare_runs shows design variants side by side.
 
-6. LS-DYNA d3plot results, plain or FEMZIP-compressed, provide the point arrays 'Deflection' (displacement) and 'UserID' (node ids) and the cell arrays 'EffPlastStrn' (effective plastic strain of shells; other elements have none) and 'PartID'. Eroded elements are removed.
+6. LS-DYNA d3plot results, plain or FEMZIP-compressed, provide the point arrays 'Deflection' (displacement) and 'UserID' (node ids) and the cell arrays 'EffPlastStrn' (effective plastic strain of shells; other elements have none) and 'PartID'. Eroded elements are removed. Their parts have names: list_parts lists them and show_parts isolates or highlights them.
 
 7. For values at specific places, use get_data_info for bounds and ranges, sample_over_line for a profile along a line, and probe_over_time for a node over time. Time series (energies, forces, accelerations) come from each run's binout files: find them with list_time_series and chart them with get_time_series, also across runs to compare them. The runs appear to use the units mm, s, t (tonnes), N and mJ (N*mm), inferred from the initial velocity and kinetic energy.
 
@@ -648,6 +648,48 @@ def probe_over_time(field: str, point: list[float] | None = None, start_index: i
     return [message, _series_resource(payload)]
 
 @mcp.tool()
+def list_parts(pattern: str | None = None) -> str:
+    """
+    List the parts of the loaded LS-DYNA d3plot with id, name and element count.
+
+    Args:
+        pattern: Part of a name to filter by, e.g. "rocker" (default: all parts)
+
+    Returns:
+        One line per part
+    """
+    success, message = pv_manager.list_parts(pattern)
+    return message
+
+@mcp.tool()
+def show_parts(parts: list[str], mode: str = "only") -> str:
+    """
+    Show only some parts of the loaded LS-DYNA d3plot ("only"), or draw them
+    with the current coloring in front of the translucent gray rest of the
+    model ("highlight"). Take a screenshot afterwards to show the result.
+
+    Args:
+        parts: Part ids, names or parts of names, e.g. ["rocker", "2000132"]
+        mode: "only" or "highlight" (default: "only")
+
+    Returns:
+        The matched parts, or an error message
+    """
+    success, message = pv_manager.show_parts(parts, mode)
+    return message
+
+@mcp.tool()
+def show_all_parts() -> str:
+    """
+    Show all parts again after show_parts.
+
+    Returns:
+        Status message
+    """
+    success, message = pv_manager.show_all_parts()
+    return message
+
+@mcp.tool()
 def list_data_files(pattern: str = "**/*", limit: int = 200) -> str:
     """
     List files in the data directories that can be passed to load_data.
@@ -806,6 +848,9 @@ def list_commands() -> str:
         "compare_runs: Show 2 to 4 runs side by side",
         "list_data_files: List files in the data directories",
         "get_data_info: Describe bounds and array ranges of the active data",
+        "list_parts: List the parts of the loaded d3plot",
+        "show_parts: Show only or highlight some parts",
+        "show_all_parts: Show all parts again",
         "sample_over_line: Chart an array along a line",
         "probe_over_time: Chart an array over time at a node",
         "list_time_series: List the binout time series of a run",
