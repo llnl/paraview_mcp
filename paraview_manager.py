@@ -754,7 +754,7 @@ class ParaViewManager:
             tuple: (success, message)
         """
         try:
-            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy, GetColorTransferFunction, GetOpacityTransferFunction, GetScalarBar
+            from paraview.simple import GetActiveSource, GetActiveView, GetDisplayProperties, ColorBy, GetColorTransferFunction, GetOpacityTransferFunction, GetScalarBar, HideUnusedScalarBars
             
             source = GetActiveSource()
             if not source:
@@ -836,6 +836,8 @@ class ParaViewManager:
                 GetOpacityTransferFunction(field).RescaleTransferFunction(low, high)
             # Cells without a value (e.g. solids for shell results) are drawn gray.
             lut.NanColor = [0.6, 0.6, 0.6]
+            # The legend of the previous coloring stays visible otherwise.
+            HideUnusedScalarBars(view)
             display.SetScalarBarVisibility(view, True)
             scalar_bar = GetScalarBar(lut, view)
             scalar_bar.WindowLocation = "Upper Right Corner"
